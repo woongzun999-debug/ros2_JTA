@@ -1,0 +1,1745 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>JTA Bot 실시간 2D 맵 & 자율주행 제어 (:9999/map)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    #map-canvas {
+      touch-action: none;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body class="min-h-screen lg:h-screen flex flex-col overflow-y-auto lg:overflow-hidden">
+
+  <!-- 상단 네비게이션 바 -->
+  <header class="w-full px-4 py-2 bg-slate-900/95 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+    <div class="flex items-center gap-2.5">
+      <a href="/dashboard" class="px-3 py-1 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">
+        🎛️ 관제 대시보드 (1P)
+      </a>
+      <span class="px-3 py-1 rounded-lg text-xs font-bold bg-cyan-600/20 text-cyan-300 border border-cyan-500/40">
+        🗺️ 실시간 2D 맵 · 자율주행 제어 (2P)
+      </span>
+    </div>
+
+    <div class="flex items-center gap-2 shrink-0">
+      <span id="header-voltage-bar" class="text-xs px-2.5 py-1 rounded-lg font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700 whitespace-nowrap">
+        🔋 --.-V (--%)
+      </span>
+      <button onclick="fitMap()" class="px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 active:scale-95 transition whitespace-nowrap">
+        🔍 전체 맞춤
+      </button>
+    </div>
+  </header>
+
+  <!-- 메인 3열 영역: 좌측(카메라·범례 탭) + 중앙(순수 2D 맵 가두리) + 우측(제어 사이드바) -->
+  <div class="flex-1 flex flex-col lg:flex-row lg:overflow-hidden p-2 gap-2 bg-slate-950">
+
+    <!-- 좌측: 맵 범례 + 상태 + 카메라·YOLO 통합 패널 (260px 스몰 고정) -->
+    <section id="map-cam-card" class="w-full lg:w-[260px] bg-slate-900/95 border border-slate-800 rounded-xl shadow-xl flex flex-col overflow-hidden shrink-0">
+      <!-- 상단 헤더 -->
+      <div class="px-2.5 py-1.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-1.5">
+        <span class="text-xs font-bold text-slate-100 whitespace-nowrap">📷 카메라 · YOLO</span>
+        <span id="map-cam-fps" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-emerald-400 border border-slate-800 font-mono font-bold whitespace-nowrap">-- FPS</span>
+      </div>
+
+      <!-- 상단 범례 (4행 크게 표시) -->
+      <div class="px-3 py-2.5 bg-slate-950/75 border-b border-slate-800 flex flex-col gap-1.5 text-xs font-mono text-slate-200">
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-emerald-400 inline-block shrink-0"></span> 로봇 위치 (/amcl_pose)</div>
+        <div class="flex items-center gap-2"><span class="w-3 h-0.5 bg-cyan-400 inline-block shrink-0"></span> 주행 경로 (/plan)</div>
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-rose-400 inline-block shrink-0"></span> 실시간 라이다 (/scan)</div>
+        <div class="flex items-center gap-2"><span class="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block shrink-0"></span> 순찰 코스 (WP 1~20)</div>
+      </div>
+
+      <!-- 범례 하단: Nav2 주행 · 루프 순찰 · 주행 가능 상태 디스플레이 (3행) -->
+      <div class="px-3 py-2 bg-slate-900/90 border-b border-slate-800 flex flex-col gap-1.5 text-xs font-mono">
+        <div id="nav-mode-badge" class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 flex items-center gap-1.5 font-bold truncate">
+          <span class="w-2 h-2 rounded-full bg-slate-500 shrink-0"></span>
+          <span class="truncate">대기 중 (IDLE)</span>
+        </div>
+        <div id="patrol-status-badge" class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-semibold truncate">
+          순찰: IDLE
+        </div>
+        <div id="drive-ready-badge" class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-bold truncate">
+          주행 상태 확인 중...
+        </div>
+        <div id="wp-goal-badge" class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-semibold truncate">
+          목표 이동: 대기
+        </div>
+        <div id="yolo-zone-badge" class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-semibold truncate">
+          👤 사람탐지: 상시 ON
+        </div>
+      </div>
+
+      <!-- 하단: 카메라 · YOLO 스트림 (원본 JPEG 패스스루 + 브라우저 Canvas YOLO 오버레이) -->
+      <div class="flex-1 flex flex-col justify-center bg-black min-h-0">
+        <div class="relative w-full aspect-[4/3] bg-black">
+          <img id="map-mjpeg-stream" src="/video_feed" alt="Camera + YOLO Stream"
+               class="w-full h-full object-contain block select-none pointer-events-none"
+               onerror="this.removeAttribute('src'); setTimeout(()=>{this.src='/video_feed';}, 1500);">
+          <canvas id="map-yolo-overlay-canvas" class="absolute inset-0 w-full h-full pointer-events-none"></canvas>
+        </div>
+        <div id="map-yolo-tag" class="px-2.5 py-1.5 bg-slate-950/95 border-t border-slate-800 text-[11px] font-mono text-cyan-300 truncate">
+          감지 대기 중...
+        </div>
+      </div>
+    </section>
+
+    <!-- 중앙: 순수 2D 맵 가두리 캔버스 -->
+    <main class="relative h-[360px] sm:h-[420px] lg:h-auto lg:flex-1 bg-slate-950 border-2 border-slate-700/90 rounded-xl shadow-inner overflow-hidden shrink-0">
+      <canvas id="map-canvas" class="w-full h-full block cursor-grab active:cursor-grabbing"></canvas>
+
+      <div id="map-empty-overlay" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-slate-400 gap-2">
+        <div class="text-2xl">🗺️</div>
+        <div class="text-sm font-bold text-slate-300">/map 토픽 대기 중...</div>
+        <div class="text-xs text-slate-500">우측에서 Nav2 또는 SLAM을 시작하면 지도가 표시됩니다.</div>
+      </div>
+    </main>
+
+    <!-- 우측: 제어 사이드바 (WP · 위험구간만 2-Tab 분리) -->
+    <aside class="w-full lg:w-80 xl:w-96 bg-slate-900/95 border border-slate-800 rounded-xl p-3 flex flex-col gap-2.5 lg:overflow-y-auto shrink-0">
+
+      <!-- 1. 자율주행 · SLAM 제어 -->
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between">
+          <span class="font-bold text-xs text-slate-100">🧭 자율주행 · SLAM 제어</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 font-mono">PIN 보호</span>
+        </div>
+        <div class="grid grid-cols-2 gap-1.5">
+          <button id="btn-nav2-start" onclick="openPinModal('nav2_start', 'Nav2 자율주행 시작')"
+                  class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600/90 hover:bg-emerald-500 text-white active:scale-95 transition border border-emerald-500 shadow">
+            🚀 Nav2 시작
+          </button>
+          <button id="btn-nav2-stop" onclick="stopNavModeNow('nav2_stop')"
+                  class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-700/90 hover:bg-rose-600 text-white active:scale-95 transition border border-rose-600 shadow">
+            ⏹️ Nav2 종료
+          </button>
+          <button id="btn-slam-start" onclick="openPinModal('slam_start', 'SLAM 지도 작성 시작')"
+                  class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-sky-600/90 hover:bg-sky-500 text-white active:scale-95 transition border border-sky-500 shadow">
+            🗺️ SLAM 시작
+          </button>
+          <button id="btn-slam-stop" onclick="stopNavModeNow('slam_stop')"
+                  class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-700 hover:bg-slate-600 text-white active:scale-95 transition border border-slate-600 shadow">
+            ⏹️ SLAM 종료
+          </button>
+          <button id="btn-relocalize" onclick="stopNavModeNow('relocalize')"
+                  class="col-span-2 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-600/90 hover:bg-amber-500 text-white active:scale-95 transition border border-amber-500 shadow">
+            🎯 위치 찾기
+          </button>
+        </div>
+      </div>
+
+      <!-- 2. Teleop 수동 조종 + VLM 브리핑 -->
+      <div class="pt-2 border-t border-slate-800 space-y-1.5">
+        <div class="flex items-center justify-between">
+          <span class="font-bold text-xs text-slate-100">🕹️ Teleop 조종 (WASD / 방향키)</span>
+          <span id="teleop-badge" class="text-[10px] font-mono text-slate-400">정지</span>
+        </div>
+        <div class="grid grid-cols-3 gap-2 w-full max-w-[330px] mx-auto select-none">
+          <div></div>
+          <button onpointerdown="startTeleop(0.16, 0.0, '전진')" onpointerup="stopTeleop()" onpointerleave="stopTeleop()" onpointercancel="stopTeleop()"
+                  class="py-2 rounded-lg text-sm font-bold bg-slate-800 hover:bg-cyan-700 active:bg-cyan-600 text-white border border-slate-700 shadow">
+            ⬆️
+          </button>
+          <div></div>
+          <button onpointerdown="startTeleop(0.0, 0.70, '좌회전')" onpointerup="stopTeleop()" onpointerleave="stopTeleop()" onpointercancel="stopTeleop()"
+                  class="py-2 rounded-lg text-sm font-bold bg-slate-800 hover:bg-cyan-700 active:bg-cyan-600 text-white border border-slate-700 shadow">
+            ⬅️
+          </button>
+          <button onclick="stopTeleop()"
+                  class="py-2 rounded-lg text-xs font-black bg-rose-700 hover:bg-rose-600 text-white border border-rose-500 shadow">
+            ⏹️
+          </button>
+          <button onpointerdown="startTeleop(0.0, -0.70, '우회전')" onpointerup="stopTeleop()" onpointerleave="stopTeleop()" onpointercancel="stopTeleop()"
+                  class="py-2 rounded-lg text-sm font-bold bg-slate-800 hover:bg-cyan-700 active:bg-cyan-600 text-white border border-slate-700 shadow">
+            ➡️
+          </button>
+          <div></div>
+          <button onpointerdown="startTeleop(-0.14, 0.0, '후진')" onpointerup="stopTeleop()" onpointerleave="stopTeleop()" onpointercancel="stopTeleop()"
+                  class="py-2 rounded-lg text-sm font-bold bg-slate-800 hover:bg-cyan-700 active:bg-cyan-600 text-white border border-slate-700 shadow">
+            ⬇️
+          </button>
+          <div class="flex items-end justify-end">
+            <button id="map-vlm-btn" onclick="triggerVlmBriefingMap()"
+                    class="w-3/4 px-1.5 py-1 rounded-md text-[10px] font-bold bg-indigo-700/90 hover:bg-indigo-600 active:scale-95 text-white border border-indigo-500 shadow transition truncate">
+              🗣️ <span id="map-vlm-label">VLM</span>
+            </button>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-1.5 pt-1">
+          <button onclick="turnRobot(90, '좌 90° 회전')"
+                  class="py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-cyan-700 active:scale-95 text-cyan-300 border border-slate-700 shadow transition">
+            ↺ 좌 90°
+          </button>
+          <button onclick="turnRobot(180, '180° 회전')"
+                  class="py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-cyan-700 active:scale-95 text-amber-300 border border-slate-700 shadow transition">
+            🔄 180°
+          </button>
+          <button onclick="turnRobot(-90, '우 90° 회전')"
+                  class="py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-cyan-700 active:scale-95 text-cyan-300 border border-slate-700 shadow transition">
+            ↻ 우 90°
+          </button>
+        </div>
+      </div>
+
+      <!-- 3. WP 이동 · 위험구간 (2-Tab 전환) -->
+      <div class="pt-2 border-t border-slate-800 space-y-2">
+        <div class="grid grid-cols-2 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+          <button id="tab-btn-wp" type="button" onclick="switchControlTab('wp')"
+                  class="py-1.5 rounded-lg text-xs font-bold bg-cyan-600 text-white shadow transition">
+            🎯 WP 이동 (<span id="wp-count-text">0</span>/20)
+          </button>
+          <button id="tab-btn-hazard" type="button" onclick="switchControlTab('hazard')"
+                  class="py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-slate-200 transition">
+            🚧 위험구간 (<span id="hz-count-text">0</span>)
+          </button>
+        </div>
+
+        <!-- [탭 1] 웨이포인트 순찰 & 단일 WP 이동 -->
+        <div id="tab-panel-wp" class="space-y-1.5">
+          <div class="grid grid-cols-2 gap-1.5">
+            <button id="btn-wp-add" onclick="addCurrentWaypoint()"
+                    class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-cyan-600/90 hover:bg-cyan-500 text-white active:scale-95 transition border border-cyan-500 shadow">
+              📍 현재 위치 추가
+            </button>
+            <button id="btn-wp-clear" onclick="openPinModal('clear_waypoints', '순찰 코스 초기화')"
+                    class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-rose-800 text-rose-300 active:scale-95 transition border border-rose-700/60 shadow">
+              🗑️ 코스 초기화
+            </button>
+            <button id="btn-patrol-start" onclick="setPatrol(true)"
+                    class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-indigo-600/90 hover:bg-indigo-500 text-white active:scale-95 transition border border-indigo-500 shadow">
+              🔁 루프 순찰 시작
+            </button>
+            <button id="btn-patrol-stop" onclick="setPatrol(false)"
+                    class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-700 hover:bg-rose-700 text-white active:scale-95 transition border border-slate-600 shadow">
+              ⏹️ 순찰 중지
+            </button>
+            <button id="btn-custom-patrol" type="button" onclick="openCustomPatrolModal()"
+                    class="col-span-2 px-2.5 py-2 rounded-lg text-xs font-bold bg-violet-600/90 hover:bg-violet-500 text-white active:scale-95 transition border border-violet-400 shadow">
+              🧭 지정순찰모드 (순서 선택)
+            </button>
+            <button id="btn-set-dock" type="button" onclick="setCurrentDock()"
+                    class="col-span-2 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-600/90 hover:bg-amber-500 text-white active:scale-95 transition border border-amber-400 shadow flex items-center justify-between">
+              <span>🔌 현재 위치 충전소 지정 (10.5V 복귀)</span>
+              <span id="dock-status-text" class="text-[10px] font-mono bg-black/30 px-1.5 py-0.5 rounded">미지정</span>
+            </button>
+          </div>
+          <div class="pt-1 space-y-1">
+            <div class="flex items-center justify-between gap-1">
+              <span class="text-[11px] font-bold text-slate-300">🎯 단일 WP 이동 (터치 후 확인)</span>
+              <button id="btn-wp-edit" type="button" onclick="toggleWpDeleteMode()"
+                      class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 hover:bg-rose-900/70 text-slate-300 hover:text-rose-200 border border-slate-600 transition shrink-0">
+                🗑️ 삭제편집
+              </button>
+            </div>
+            <div id="wp-quick-list" class="grid grid-cols-3 gap-1.5">
+              <span class="col-span-3 text-[11px] text-slate-500">등록된 웨이포인트 없음</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- [탭 2] 위험구간 설정 (가상벽 Keepout + 가상 턱 SpeedFilter) -->
+        <div id="tab-panel-hazard" class="hidden space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-bold text-slate-300">모드 상태</span>
+            <span id="hz-status-msg" class="text-[10px] text-slate-400 truncate max-w-[170px]">지도 이동 모드</span>
+          </div>
+          <div class="grid grid-cols-2 gap-1.5">
+            <button id="btn-hz-keepout" onclick="toggleHazardMode('keepout')"
+                    class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-rose-700/80 text-rose-300 active:scale-95 transition border border-rose-700/60 shadow">
+              🟥 가상벽 (선)
+            </button>
+            <button id="btn-hz-speed" onclick="toggleHazardMode('speed')"
+                    class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-amber-600/80 text-amber-300 active:scale-95 transition border border-amber-600/60 shadow">
+              🟨 가상 턱 (40%)
+            </button>
+            <button id="btn-hz-detect" onclick="toggleHazardMode('detect')"
+                    class="col-span-2 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-blue-700/80 text-blue-300 active:scale-95 transition border border-blue-700/60 shadow">
+              🟦 사람탐지 구역 (사각형)
+            </button>
+            <button id="btn-hz-undo" onclick="undoHazardZone()"
+                    class="col-span-2 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 active:scale-95 transition border border-slate-600 shadow">
+              ↩️ 마지막 그리기 실행취소
+            </button>
+            <button id="btn-hz-clear" onclick="clearHazardOnlyZones()"
+                    class="px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-rose-900/70 text-rose-300 active:scale-95 transition border border-rose-700/50 shadow">
+              🗑️ 가상벽·턱 삭제
+            </button>
+            <button id="btn-detect-clear" onclick="clearDetectionZones()"
+                    class="px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-blue-900/70 text-blue-300 active:scale-95 transition border border-blue-700/50 shadow">
+              🗑️ 탐지구역 삭제
+            </button>
+          </div>
+          <button id="btn-hz-save" onclick="saveHazardZones()"
+                  class="w-full px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-700/90 hover:bg-emerald-600 text-white active:scale-95 transition border border-emerald-500 shadow">
+            💾 위험구간 저장 및 Nav2 적용
+          </button>
+        </div>
+      </div>
+
+      <!-- 4. 주행 취소(브레이크) & 비상 정지(E-STOP) & 주행 전체 초기화 -->
+      <div class="pt-2 border-t border-slate-800 space-y-1.5">
+        <button id="btn-map-nav-cancel" onclick="cancelNavigationMap()"
+                class="w-full px-3 py-2 rounded-lg text-xs font-black bg-amber-600/90 hover:bg-amber-500 text-white active:scale-95 transition border border-amber-400 shadow flex items-center justify-center gap-1.5">
+          ⏸️ <span id="map-nav-cancel-label">주행 전체 취소 · 브레이크 (토크 유지)</span>
+        </button>
+        <div class="grid grid-cols-3 gap-1.5">
+          <button id="btn-map-estop" onclick="emergencyStopMap()"
+                  class="col-span-2 px-2.5 py-2.5 rounded-lg text-xs font-black bg-rose-600 hover:bg-rose-500 text-white active:scale-95 transition border border-rose-400 shadow-lg shadow-rose-950/50 flex items-center justify-center gap-1">
+            🛑 <span id="map-estop-label">비상 정지 (E-STOP)</span>
+          </button>
+          <button id="btn-map-motor-on" onclick="recoverMotorTorqueMap()"
+                  class="col-span-1 px-2 py-2.5 rounded-lg text-xs font-bold bg-emerald-700/90 hover:bg-emerald-600 text-white active:scale-95 transition border border-emerald-500 shadow flex items-center justify-center gap-1">
+            ⚡ <span id="map-motor-on-label">모터 ON</span>
+          </button>
+        </div>
+        <button id="btn-full-reset" onclick="stopNavModeNow('full_reset')"
+                class="w-full px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-rose-950/70 text-rose-300 hover:text-rose-200 active:scale-95 transition border border-rose-700/60 shadow flex items-center justify-center gap-1.5">
+          🔄 주행 전체 초기화 (모터 정지 · 브릿지 재기동)
+        </button>
+      </div>
+
+      <!-- 실시간 좌표 / 맵 정보 박스 -->
+      <div class="mt-auto bg-slate-950 rounded-xl border border-slate-800 p-2.5 text-[11px] font-mono space-y-1 text-slate-400">
+        <div id="pose-readout" class="text-emerald-400 font-bold">로봇 좌표: 수신 대기 중</div>
+        <div id="map-info-readout">맵 정보: -- × -- (0.05m/px)</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- PIN 입력 모달 -->
+  <div id="pin-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-xs w-full p-4 shadow-2xl space-y-3">
+      <h3 id="pin-modal-title" class="text-sm font-bold text-slate-100">비밀번호 입력</h3>
+      <input id="pin-modal-input" type="password" inputmode="numeric" placeholder="비밀번호 입력"
+             onkeydown="if(event.key==='Enter') submitPinModal(); if(event.key==='Escape') closePinModal();"
+             class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-cyan-500" />
+      <p id="pin-modal-error" class="hidden text-xs text-rose-400 font-semibold"></p>
+      <div class="flex justify-end gap-2 pt-1">
+        <button onclick="closePinModal()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300">취소</button>
+        <button id="pin-modal-submit" onclick="submitPinModal()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 지정순찰모드 순서 선택 모달 -->
+  <div id="custom-patrol-modal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4"
+       onclick="if(event.target===this) closeCustomPatrolModal();">
+    <div class="bg-slate-900 border border-violet-500/60 rounded-2xl max-w-md w-full p-4 shadow-2xl space-y-3">
+      <div class="flex items-center justify-between gap-2">
+        <div>
+          <h3 class="text-sm font-bold text-violet-200">🧭 지정순찰모드 — 이동 순서 선택</h3>
+          <p class="text-[11px] text-slate-400 mt-0.5">원하는 WP를 순서대로 터치하세요 (다시 누르면 해제 · 끝점 후 1번 반복)</p>
+        </div>
+        <button type="button" onclick="closeCustomPatrolModal()"
+                class="w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs shrink-0">✕</button>
+      </div>
+
+      <!-- 선택된 순서도 미리보기 -->
+      <div class="bg-slate-950 border border-slate-800 rounded-xl p-2.5 space-y-1">
+        <div class="flex items-center justify-between text-[11px]">
+          <span class="font-bold text-slate-300">선택 경로 (<span id="cp-selected-count">0</span>개)</span>
+          <span class="text-[10px] text-violet-300 font-mono">1번 WP부터 순서대로 출발</span>
+        </div>
+        <div id="cp-route-preview" class="text-xs font-mono font-bold text-cyan-300 break-words leading-relaxed min-h-[20px]">
+          아직 선택된 WP가 없습니다.
+        </div>
+      </div>
+
+      <!-- WP 선택 버튼 그리드 -->
+      <div id="cp-wp-grid" class="grid grid-cols-3 gap-2 max-h-60 overflow-y-auto pr-0.5"></div>
+
+      <!-- 빠른 편집 버튼 -->
+      <div class="grid grid-cols-3 gap-1.5">
+        <button type="button" onclick="popCustomPatrolWp()"
+                class="px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 active:scale-95 transition">
+          ↩️ 마지막 빼기
+        </button>
+        <button type="button" onclick="clearCustomPatrolOrder()"
+                class="px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-rose-900/70 text-rose-300 border border-rose-800/60 active:scale-95 transition">
+          🧹 선택 초기화
+        </button>
+        <button type="button" onclick="selectAllCustomPatrolOrder()"
+                class="px-2 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 hover:bg-cyan-900/70 text-cyan-300 border border-cyan-800/60 active:scale-95 transition">
+          📋 전체 순서대로
+        </button>
+      </div>
+
+      <!-- 하단 실행 버튼 -->
+      <div class="flex justify-end gap-2 pt-1 border-t border-slate-800">
+        <button type="button" onclick="closeCustomPatrolModal()"
+                class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300">
+          취소
+        </button>
+        <button id="btn-cp-start" type="button" onclick="startCustomPatrol()"
+                class="px-4 py-2 rounded-lg text-xs font-bold bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white border border-violet-400 shadow active:scale-95 transition">
+          🚀 지정순찰 시작
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('map-canvas');
+    const ctx = canvas.getContext('2d');
+    let mapImg = null;
+    let mapVersion = -1;
+    let mapState = null;
+
+    let scale = 3.0;
+    let offsetX = 0;
+    let offsetY = 0;
+    let hasFittedOnce = false;
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartY = 0;
+
+    function resizeCanvas() {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.floor(rect.width));
+      canvas.height = Math.max(1, Math.floor(rect.height));
+      if (!hasFittedOnce && mapState && mapState.width > 0) fitMap();
+      draw();
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    const MAP_VIEW_KEY = 'jta_map_view_v4';
+    function saveMapView() {
+      if (!hasFittedOnce) return;
+      try {
+        localStorage.setItem(MAP_VIEW_KEY, JSON.stringify({ scale, offsetX, offsetY }));
+      } catch (_) {}
+    }
+    function loadMapView() {
+      try {
+        const raw = localStorage.getItem(MAP_VIEW_KEY);
+        if (!raw) return false;
+        const parsed = JSON.parse(raw);
+        if (Number.isFinite(parsed?.scale) && Number.isFinite(parsed?.offsetX) && Number.isFinite(parsed?.offsetY)) {
+          scale = parsed.scale;
+          offsetX = parsed.offsetX;
+          offsetY = parsed.offsetY;
+          hasFittedOnce = true;
+          return true;
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    function getMapContentBounds() {
+      if (!mapImg || !mapState || !mapState.width || !mapState.height) return null;
+      try {
+        const off = document.createElement('canvas');
+        off.width = mapState.width;
+        off.height = mapState.height;
+        const octx = off.getContext('2d');
+        octx.drawImage(mapImg, 0, 0);
+        const data = octx.getImageData(0, 0, off.width, off.height).data;
+        const bgR = data[0], bgG = data[1], bgB = data[2];
+        let minX = off.width, minY = off.height, maxX = -1, maxY = -1;
+        for (let y = 0; y < off.height; y++) {
+          for (let x = 0; x < off.width; x++) {
+            const idx = (y * off.width + x) * 4;
+            if (Math.abs(data[idx] - bgR) > 8 || Math.abs(data[idx + 1] - bgG) > 8 || Math.abs(data[idx + 2] - bgB) > 8) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (maxX >= minX && maxY >= minY) {
+          return { minX, minY, maxX: maxX + 1, maxY: maxY + 1 };
+        }
+      } catch (_) {}
+      return { minX: 0, minY: 0, maxX: mapState.width, maxY: mapState.height };
+    }
+
+    function fitMap() {
+      if (!mapState || !mapState.width || !mapState.height) return;
+      const box = getMapContentBounds() || { minX: 0, minY: 0, maxX: mapState.width, maxY: mapState.height };
+      const boxW = Math.max(1, box.maxX - box.minX);
+      const boxH = Math.max(1, box.maxY - box.minY);
+      const cx = (box.minX + box.maxX) / 2;
+      const cy = (box.minY + box.maxY) / 2;
+      const pad = 24;
+      const sx = (canvas.width - pad) / boxW;
+      const sy = (canvas.height - pad) / boxH;
+      scale = Math.max(0.5, Math.min(sx, sy));
+      offsetX = canvas.width / 2 - cx * scale;
+      offsetY = canvas.height / 2 - cy * scale;
+      hasFittedOnce = true;
+      saveMapView();
+      draw();
+    }
+
+    function worldToScreen(wx, wy) {
+      const px = (wx - mapState.origin_x) / mapState.resolution;
+      const py = mapState.height - (wy - mapState.origin_y) / mapState.resolution;
+      return [offsetX + px * scale, offsetY + py * scale];
+    }
+
+    function screenToWorld(sx, sy) {
+      const px = (sx - offsetX) / scale;
+      const py = (sy - offsetY) / scale;
+      const wx = mapState.origin_x + px * mapState.resolution;
+      const wy = mapState.origin_y + (mapState.height - py) * mapState.resolution;
+      return [Number(wx.toFixed(3)), Number(wy.toFixed(3))];
+    }
+
+    let hazardZones = [];
+    let detectionZones = [];
+    let hazardDirty = false;
+    let hazardEditMode = null; // null | 'keepout' | 'speed' | 'detect'
+    let hazardDraft = null;
+
+    function updateHazardUI(msg) {
+      const cntEl = document.getElementById('hz-count-text');
+      const msgEl = document.getElementById('hz-status-msg');
+      const btnK = document.getElementById('btn-hz-keepout');
+      const btnS = document.getElementById('btn-hz-speed');
+      const btnD = document.getElementById('btn-hz-detect');
+      if (cntEl) cntEl.textContent = String(hazardZones.length + detectionZones.length);
+      if (msgEl) {
+        if (msg) msgEl.textContent = msg;
+        else if (hazardEditMode === 'keepout') msgEl.textContent = '드래그로 가상벽 그리기';
+        else if (hazardEditMode === 'speed') msgEl.textContent = '드래그로 서행(40%) 박스';
+        else if (hazardEditMode === 'detect') msgEl.textContent = '드래그로 사람탐지 구역';
+        else msgEl.textContent = hazardDirty ? '미저장 변경 있음' : '지도 이동 모드';
+      }
+      if (btnK) btnK.className = hazardEditMode === 'keepout'
+        ? 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-600 text-white ring-2 ring-rose-300 transition border border-rose-400 shadow'
+        : 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-rose-700/80 text-rose-300 active:scale-95 transition border border-rose-700/60 shadow';
+      if (btnS) btnS.className = hazardEditMode === 'speed'
+        ? 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 ring-2 ring-amber-200 transition border border-amber-300 shadow'
+        : 'px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-amber-600/80 text-amber-300 active:scale-95 transition border border-amber-600/60 shadow';
+      if (btnD) btnD.className = hazardEditMode === 'detect'
+        ? 'col-span-2 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white ring-2 ring-blue-300 transition border border-blue-400 shadow'
+        : 'col-span-2 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-blue-700/80 text-blue-300 active:scale-95 transition border border-blue-700/60 shadow';
+      canvas.style.cursor = hazardEditMode ? 'crosshair' : 'grab';
+    }
+
+    function toggleHazardMode(mode) {
+      hazardEditMode = (hazardEditMode === mode) ? null : mode;
+      hazardDraft = null;
+      updateHazardUI();
+      draw();
+    }
+
+    function undoHazardZone() {
+      if (hazardEditMode === 'detect') {
+        if (detectionZones.length === 0) return;
+        detectionZones.pop();
+      } else if (hazardZones.length > 0) {
+        hazardZones.pop();
+      } else if (detectionZones.length > 0) {
+        detectionZones.pop();
+      } else {
+        return;
+      }
+      hazardDirty = true;
+      updateHazardUI();
+      draw();
+    }
+
+    function clearHazardOnlyZones() {
+      hazardZones = [];
+      hazardDirty = true;
+      updateHazardUI('가상벽·턱 삭제됨 (저장 필요)');
+      draw();
+    }
+
+    function clearDetectionZones() {
+      detectionZones = [];
+      hazardDirty = true;
+      updateHazardUI('탐지 구역 삭제됨 (저장 필요)');
+      draw();
+    }
+
+    async function saveHazardZones() {
+      updateHazardUI('저장/전송 중...');
+      try {
+        const [resH, resD] = await Promise.all([
+          fetch('/api/map/hazard_zones', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zones: hazardZones })
+          }),
+          fetch('/api/map/detection_zones', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zones: detectionZones })
+          })
+        ]);
+        const dataH = await resH.json();
+        const dataD = await resD.json();
+        if (dataH.success && dataD.success) {
+          hazardDirty = false;
+          hazardEditMode = null;
+          if (Array.isArray(dataH.hazard_zones)) hazardZones = dataH.hazard_zones;
+          if (Array.isArray(dataD.detection_zones)) detectionZones = dataD.detection_zones;
+          updateHazardUI(dataH.message || dataD.message || '저장 완료');
+        } else {
+          updateHazardUI(dataH.message || dataD.message || '저장 실패');
+        }
+      } catch (e) {
+        updateHazardUI('서버 통신 오류');
+      }
+      draw();
+    }
+
+    function drawHazardShape(z, isDraft) {
+      const [sx1, sy1] = worldToScreen(z.x1, z.y1);
+      const [sx2, sy2] = worldToScreen(z.x2, z.y2);
+      ctx.save();
+      if (z.type === 'keepout') {
+        const thickPx = Math.max(4, ((z.thickness || 0.15) / mapState.resolution) * scale);
+        ctx.strokeStyle = isDraft ? 'rgba(251, 113, 133, 0.9)' : 'rgba(244, 63, 94, 0.85)';
+        ctx.lineWidth = thickPx;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.stroke();
+      } else if (z.type === 'detect') {
+        const rx = Math.min(sx1, sx2);
+        const ry = Math.min(sy1, sy2);
+        const rw = Math.abs(sx2 - sx1);
+        const rh = Math.abs(sy2 - sy1);
+        ctx.fillStyle = isDraft ? 'rgba(59, 130, 246, 0.22)' : 'rgba(59, 130, 246, 0.18)';
+        ctx.strokeStyle = 'rgba(96, 165, 250, 0.95)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeRect(rx, ry, rw, rh);
+        ctx.setLineDash([]);
+        if (rw > 34 && rh > 16) {
+          ctx.fillStyle = '#bfdbfe';
+          ctx.font = 'bold 10px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('👤 탐지구역', rx + rw / 2, ry + rh / 2);
+        }
+      } else if (z.type === 'speed') {
+        const rx = Math.min(sx1, sx2);
+        const ry = Math.min(sy1, sy2);
+        const rw = Math.abs(sx2 - sx1);
+        const rh = Math.abs(sy2 - sy1);
+        ctx.fillStyle = isDraft ? 'rgba(250, 204, 21, 0.25)' : 'rgba(250, 204, 21, 0.30)';
+        ctx.strokeStyle = 'rgba(250, 204, 21, 0.95)';
+        ctx.lineWidth = 2;
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeRect(rx, ry, rw, rh);
+        if (rw > 24 && rh > 14) {
+          ctx.fillStyle = '#fef08a';
+          ctx.font = 'bold 10px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText((z.speed_pct || 40) + '%', rx + rw / 2, ry + rh / 2);
+        }
+      }
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!mapState || !mapState.width || !mapImg) return;
+
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(mapImg, offsetX, offsetY, mapState.width * scale, mapState.height * scale);
+
+      // 위험구간 (가상벽 + 서행존) & 사람탐지 구역
+      for (const z of hazardZones) drawHazardShape(z, false);
+      for (const z of detectionZones) drawHazardShape(z, false);
+      if (hazardDraft) drawHazardShape(hazardDraft, true);
+
+      // 순찰 웨이포인트 연결선 & 번호 마커
+      if (mapState.waypoints && mapState.waypoints.length > 0) {
+        if (mapState.waypoints.length > 1) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.setLineDash([5, 4]);
+          ctx.strokeStyle = 'rgba(251, 191, 36, 0.7)';
+          ctx.lineWidth = 1.5;
+          mapState.waypoints.forEach((wp, idx) => {
+            const [sx, sy] = worldToScreen(wp.x, wp.y);
+            if (idx === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+          });
+          ctx.closePath();
+          ctx.stroke();
+          ctx.restore();
+        }
+        mapState.waypoints.forEach((wp, idx) => {
+          const [sx, sy] = worldToScreen(wp.x, wp.y);
+          ctx.beginPath();
+          ctx.arc(sx, sy, 9, 0, Math.PI * 2);
+          ctx.fillStyle = '#f59e0b';
+          ctx.fill();
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = '#0f172a';
+          ctx.stroke();
+          ctx.fillStyle = '#0f172a';
+          ctx.font = 'bold 10px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String(idx + 1), sx, sy + 0.5);
+        });
+      }
+
+      if (mapState.path && mapState.path.length > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = '#22d3ee';
+        ctx.lineWidth = 2.5;
+        mapState.path.forEach((pt, idx) => {
+          const [sx, sy] = worldToScreen(pt[0], pt[1]);
+          if (idx === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        });
+        ctx.stroke();
+      }
+
+      if (mapState.scan_points && mapState.scan_points.length > 0) {
+        ctx.fillStyle = '#fb7185';
+        for (const pt of mapState.scan_points) {
+          const [sx, sy] = worldToScreen(pt[0], pt[1]);
+          ctx.fillRect(sx - 1.5, sy - 1.5, 3, 3);
+        }
+      }
+
+      if (mapState.robot_pose) {
+        const { x, y, yaw } = mapState.robot_pose;
+        const [rx, ry] = worldToScreen(x, y);
+        const rPx = Math.max(7, (0.20 / mapState.resolution) * scale);
+
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(-yaw);
+
+        ctx.beginPath();
+        ctx.arc(0, 0, rPx, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(16, 185, 129, 0.35)';
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#10b981';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(rPx * 1.4, 0);
+        ctx.strokeStyle = '#fef08a';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      offsetX = mx - (mx - offsetX) * factor;
+      offsetY = my - (my - offsetY) * factor;
+      scale = Math.max(0.4, Math.min(30, scale * factor));
+      hasFittedOnce = true;
+      saveMapView();
+      draw();
+    }, { passive: false });
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (hazardEditMode && mapState && mapState.width > 0) {
+        const rect = canvas.getBoundingClientRect();
+        const [wx, wy] = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+        hazardDraft = {
+          type: hazardEditMode,
+          shape: hazardEditMode === 'keepout' ? 'line' : 'rect',
+          x1: wx, y1: wy, x2: wx, y2: wy,
+          thickness: 0.15,
+          speed_pct: 40,
+        };
+        canvas.setPointerCapture(e.pointerId);
+        draw();
+        return;
+      }
+      isDragging = true;
+      dragStartX = e.clientX - offsetX;
+      dragStartY = e.clientY - offsetY;
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (hazardDraft && hazardEditMode) {
+        const rect = canvas.getBoundingClientRect();
+        const [wx, wy] = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+        hazardDraft.x2 = wx;
+        hazardDraft.y2 = wy;
+        draw();
+        return;
+      }
+      if (!isDragging) return;
+      offsetX = e.clientX - dragStartX;
+      offsetY = e.clientY - dragStartY;
+      draw();
+    });
+    canvas.addEventListener('pointerup', () => {
+      if (hazardDraft && hazardEditMode) {
+        const dist = Math.hypot(hazardDraft.x2 - hazardDraft.x1, hazardDraft.y2 - hazardDraft.y1);
+        if (dist >= 0.05) {
+          if (hazardDraft.type === 'detect' && detectionZones.length < 20) {
+            detectionZones.push(hazardDraft);
+            hazardDirty = true;
+          } else if (hazardDraft.type !== 'detect' && hazardZones.length < 50) {
+            hazardZones.push(hazardDraft);
+            hazardDirty = true;
+          }
+        }
+        hazardDraft = null;
+        updateHazardUI();
+        draw();
+        return;
+      }
+      if (isDragging) {
+        isDragging = false;
+        hasFittedOnce = true;
+        saveMapView();
+      }
+    });
+    canvas.addEventListener('pointercancel', () => {
+      isDragging = false;
+      hazardDraft = null;
+      draw();
+    });
+
+    // Teleop Dead-man 제어
+    let teleopTimer = null;
+    function sendCmdVel(linear, angular) {
+      fetch('/api/cmd_vel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ linear, angular })
+      }).catch(() => {});
+    }
+    function startTeleop(linear, angular, label) {
+      stopTeleop(false);
+      document.getElementById('teleop-badge').textContent = label;
+      document.getElementById('teleop-badge').className = 'text-[10px] font-mono text-cyan-400 font-bold';
+      sendCmdVel(linear, angular);
+      teleopTimer = setInterval(() => sendCmdVel(linear, angular), 150);
+    }
+    function stopTeleop(sendZero = true) {
+      if (teleopTimer) {
+        clearInterval(teleopTimer);
+        teleopTimer = null;
+      }
+      if (sendZero) {
+        sendCmdVel(0.0, 0.0);
+        document.getElementById('teleop-badge').textContent = '정지';
+        document.getElementById('teleop-badge').className = 'text-[10px] font-mono text-slate-400';
+      }
+    }
+    async function turnRobot(deg, label) {
+      stopTeleop(false);
+      const badge = document.getElementById('teleop-badge');
+      badge.textContent = label;
+      badge.className = 'text-[10px] font-mono text-amber-300 font-bold';
+      try {
+        await fetch('/api/cmd_vel/turn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deg })
+        });
+      } catch (e) {}
+    }
+    window.addEventListener('blur', () => stopTeleop(true));
+
+    let activeKey = null;
+    const keyMap = {
+      'KeyW': [0.16, 0.0, '전진'],
+      'ArrowUp': [0.16, 0.0, '전진'],
+      'KeyS': [-0.14, 0.0, '후진'],
+      'ArrowDown': [-0.14, 0.0, '후진'],
+      'KeyA': [0.0, 0.70, '좌회전'],
+      'ArrowLeft': [0.0, 0.70, '좌회전'],
+      'KeyD': [0.0, -0.70, '우회전'],
+      'ArrowRight': [0.0, -0.70, '우회전'],
+    };
+    window.addEventListener('keydown', (e) => {
+      if (!document.getElementById('pin-modal').classList.contains('hidden')) return;
+      if (e.code === 'Space') { e.preventDefault(); stopTeleop(true); return; }
+      const cmd = keyMap[e.code];
+      if (cmd && activeKey !== e.code) {
+        e.preventDefault();
+        activeKey = e.code;
+        startTeleop(cmd[0], cmd[1], cmd[2]);
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (activeKey === e.code) {
+        activeKey = null;
+        stopTeleop(true);
+      }
+    });
+
+    function updateNavModeUI(mode) {
+      const badge = document.getElementById('nav-mode-badge');
+      const btnNav2 = document.getElementById('btn-nav2-start');
+      const btnSlam = document.getElementById('btn-slam-start');
+      if (btnNav2) btnNav2.classList.remove('ring-2', 'ring-emerald-300', 'ring-offset-2', 'ring-offset-slate-900');
+      if (btnSlam) btnSlam.classList.remove('ring-2', 'ring-sky-300', 'ring-offset-2', 'ring-offset-slate-900');
+      if (!badge) return;
+
+      if (mode === 'LOCALIZING') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/50 text-amber-300 flex items-center gap-1.5 font-bold truncate';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0"></span><span class="truncate">위치 찾기 중...</span>';
+        if (btnNav2) btnNav2.classList.add('ring-2', 'ring-emerald-300', 'ring-offset-2', 'ring-offset-slate-900');
+      } else if (mode === 'NAV2') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 flex items-center gap-1.5 font-bold truncate';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span><span class="truncate">Nav2 자율주행 중</span>';
+        if (btnNav2) btnNav2.classList.add('ring-2', 'ring-emerald-300', 'ring-offset-2', 'ring-offset-slate-900');
+      } else if (mode === 'SLAM') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-sky-500/20 border border-sky-500/50 text-sky-300 flex items-center gap-1.5 font-bold truncate';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-sky-400 animate-pulse shrink-0"></span><span class="truncate">SLAM 지도 작성 중</span>';
+        if (btnSlam) btnSlam.classList.add('ring-2', 'ring-sky-300', 'ring-offset-2', 'ring-offset-slate-900');
+      } else {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 flex items-center gap-1.5 font-bold truncate';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-500 shrink-0"></span><span class="truncate">대기 중 (IDLE)</span>';
+      }
+    }
+
+    function updatePatrolUI(status) {
+      const badge = document.getElementById('patrol-status-badge');
+      const btnStart = document.getElementById('btn-patrol-start');
+      const s = String(status || 'IDLE');
+      const active = s.startsWith('NAVIGATING') || s.startsWith('DWELLING') || s.startsWith('RETRY') || s.startsWith('FOLLOWING') || s.startsWith('RESUMING') || s === 'STARTING';
+
+      if (badge) {
+        if (active) {
+          badge.className = 'px-2.5 py-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/50 text-indigo-300 font-bold truncate';
+          badge.textContent = '순찰: ' + s;
+        } else {
+          badge.className = 'px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-semibold truncate';
+          badge.textContent = '순찰: ' + s;
+        }
+      }
+      if (btnStart) {
+        if (active) btnStart.classList.add('ring-2', 'ring-indigo-300', 'ring-offset-2', 'ring-offset-slate-900');
+        else btnStart.classList.remove('ring-2', 'ring-indigo-300', 'ring-offset-2', 'ring-offset-slate-900');
+      }
+    }
+
+    let localWpGoal = null;
+
+    function resolveEffectiveWpGoal(data) {
+      const ps = String((data && data.patrol_status) || '');
+      if (ps.startsWith('NAVIGATING:')) {
+        localWpGoal = null;
+        return { state: 'MOVING', target: ps.slice('NAVIGATING:'.length).trim() || '순찰' };
+      }
+      if (ps.startsWith('DWELLING:')) {
+        localWpGoal = null;
+        return { state: 'SUCCEEDED', target: ps.slice('DWELLING:'.length).trim() || '순찰' };
+      }
+      if (ps.startsWith('RETRY:')) {
+        localWpGoal = null;
+        const t = ps.slice('RETRY:'.length).trim() || '순찰';
+        return { state: 'MOVING', target: `${t} (재시도)` };
+      }
+      if (ps.startsWith('SKIPPED:')) {
+        localWpGoal = null;
+        return { state: 'FAILED', target: ps.slice('SKIPPED:'.length).trim() || '순찰' };
+      }
+
+      if (data && data.wp_goal_status && data.wp_goal_status.state && data.wp_goal_status.state !== 'IDLE') {
+        if (data.wp_goal_status.state !== 'MOVING') localWpGoal = null;
+        return data.wp_goal_status;
+      }
+
+      if (localWpGoal && localWpGoal.state === 'MOVING') {
+        const wps = (data && Array.isArray(data.waypoints)) ? data.waypoints : [];
+        const wp = wps[localWpGoal.wpIndex];
+        const pose = data && data.robot_pose;
+        if (wp && pose) {
+          const dist = Math.hypot(pose.x - wp.x, pose.y - wp.y);
+          if (dist <= 0.35) {
+            localWpGoal = { state: 'SUCCEEDED', target: localWpGoal.target, wpIndex: localWpGoal.wpIndex };
+          }
+        }
+        return localWpGoal;
+      }
+      if (localWpGoal) return localWpGoal;
+
+      const pathPts = (data && Array.isArray(data.path)) ? data.path : [];
+      if (pathPts.length >= 2) {
+        const endPt = pathPts[pathPts.length - 1];
+        const ex = Array.isArray(endPt) ? Number(endPt[0]) : Number(endPt.x);
+        const ey = Array.isArray(endPt) ? Number(endPt[1]) : Number(endPt.y);
+        const wps = (data && Array.isArray(data.waypoints)) ? data.waypoints : [];
+        let bestName = '';
+        let bestDist = 0.5;
+        if (Number.isFinite(ex) && Number.isFinite(ey)) {
+          wps.forEach((wp, idx) => {
+            const d = Math.hypot(ex - wp.x, ey - wp.y);
+            if (d < bestDist) {
+              bestDist = d;
+              bestName = wp.name || `WP${idx + 1}`;
+            }
+          });
+        }
+        return {
+          state: 'MOVING',
+          target: bestName || (Number.isFinite(ex) && Number.isFinite(ey) ? `목적지 (${ex.toFixed(1)}, ${ey.toFixed(1)})` : '주행 중')
+        };
+      }
+      return { state: 'IDLE', target: '' };
+    }
+
+    function updateWpGoalUI(wpGoal) {
+      const badge = document.getElementById('wp-goal-badge');
+      if (!badge) return;
+      const st = String((wpGoal && wpGoal.state) || 'IDLE');
+      const target = String((wpGoal && wpGoal.target) || '');
+
+      if (st === 'SENDING') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 flex items-center gap-1.5 font-bold truncate';
+        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0"></span><span class="truncate">${target} 전송 중...</span>`;
+      } else if (st === 'MOVING') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 flex items-center gap-1.5 font-bold truncate';
+        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse shrink-0"></span><span class="truncate">🎯 ${target} 이동 중...</span>`;
+      } else if (st === 'SUCCEEDED') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 font-bold truncate';
+        badge.textContent = `✅ ${target} 도착 완료`;
+      } else if (st === 'CANCELED') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/50 text-amber-300 font-semibold truncate';
+        badge.textContent = `⏹️ ${target ? target + ' ' : ''}이동 취소됨`;
+      } else if (st === 'FAILED') {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-rose-500/20 border border-rose-500/50 text-rose-300 font-bold truncate';
+        badge.textContent = `⚠️ ${target ? target + ' ' : ''}이동 실패`;
+      } else {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-semibold truncate';
+        badge.textContent = '목표 이동: 대기';
+      }
+    }
+
+    function updateYoloZoneUI(zoneState) {
+      const badge = document.getElementById('yolo-zone-badge');
+      if (!badge) return;
+      if (!zoneState || !zoneState.has_zones) {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-400 font-semibold truncate';
+        badge.textContent = '👤 사람탐지: 상시 ON';
+      } else if (zoneState.active) {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-blue-500/20 border border-blue-500/50 text-blue-300 font-bold truncate';
+        badge.textContent = '🟦 사람탐지: 구역 내 (ON)';
+      } else {
+        badge.className = 'px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-400 font-semibold truncate';
+        badge.textContent = '⬜ 사람탐지: 구역 외 (OFF)';
+      }
+    }
+
+    async function pollMapState() {
+      try {
+        const res = await fetch('/api/map/state?v=' + mapVersion, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        mapState = data;
+        if (!hazardDirty) {
+          if (Array.isArray(data.hazard_zones)) hazardZones = data.hazard_zones;
+          if (Array.isArray(data.detection_zones)) detectionZones = data.detection_zones;
+          updateHazardUI();
+        }
+
+        const emptyEl = document.getElementById('map-empty-overlay');
+        if (data.width > 0) emptyEl.classList.add('hidden');
+        else emptyEl.classList.remove('hidden');
+
+        if (data.map_png_b64 && data.map_version !== mapVersion) {
+          mapVersion = data.map_version;
+          const img = new Image();
+          img.onload = () => {
+            mapImg = img;
+            if (!hasFittedOnce) fitMap();
+            draw();
+          };
+          img.src = 'data:image/png;base64,' + data.map_png_b64;
+        } else {
+          draw();
+        }
+
+        const wpCount = (data.waypoints || []).length;
+        document.getElementById('wp-count-text').textContent = String(wpCount);
+        const addBtn = document.getElementById('btn-wp-add');
+        if (addBtn) addBtn.disabled = (wpCount >= 20);
+        renderWaypointButtons(data.waypoints || []);
+        const dockEl = document.getElementById('dock-status-text');
+        if (dockEl) {
+          if (data.dock && typeof data.dock.x === 'number') {
+            dockEl.textContent = `${data.dock.x.toFixed(2)}, ${data.dock.y.toFixed(2)}`;
+          } else {
+            dockEl.textContent = '미지정';
+          }
+        }
+
+        updateNavModeUI(data.nav_mode || 'IDLE');
+        updatePatrolUI(data.patrol_status || 'IDLE');
+        updateWpGoalUI(resolveEffectiveWpGoal(data));
+        updateYoloZoneUI(data.yolo_zone_state);
+        if (data.robot_pose) {
+          const deg = (data.robot_pose.yaw * 180 / Math.PI).toFixed(1);
+          document.getElementById('pose-readout').textContent =
+            `로봇: x=${data.robot_pose.x.toFixed(2)}m, y=${data.robot_pose.y.toFixed(2)}m, yaw=${deg}°`;
+        }
+        if (data.width > 0) {
+          document.getElementById('map-info-readout').textContent =
+            `맵: ${data.width}×${data.height} (${data.resolution}m/px)`;
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    let lastWpDataSig = '';
+    let lastWpRenderSig = '';
+    let wpDeleteMode = false;
+    let customPatrolOrder = [];
+
+    function updateWpEditButtonUI() {
+      const btn = document.getElementById('btn-wp-edit');
+      if (!btn) return;
+      if (wpDeleteMode) {
+        btn.textContent = '✅ 편집완료';
+        btn.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-rose-700 hover:bg-rose-600 text-white border border-rose-500 transition shrink-0';
+      } else {
+        btn.textContent = '🗑️ 삭제편집';
+        btn.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 hover:bg-rose-900/70 text-slate-300 hover:text-rose-200 border border-slate-600 transition shrink-0';
+      }
+    }
+
+    function toggleWpDeleteMode() {
+      wpDeleteMode = !wpDeleteMode;
+      updateWpEditButtonUI();
+      renderWaypointButtons((mapState && mapState.waypoints) || []);
+    }
+
+    function renderWaypointButtons(wps) {
+      if (!wps.length && wpDeleteMode) {
+        wpDeleteMode = false;
+        updateWpEditButtonUI();
+      }
+      const dataSig = wps.map((w, i) => `${i}:${w.name || ''}:${w.x ?? ''}:${w.y ?? ''}`).join('|');
+      const renderSig = `${dataSig}#del=${wpDeleteMode ? 1 : 0}`;
+      if (renderSig === lastWpRenderSig) return;
+      lastWpRenderSig = renderSig;
+      if (dataSig !== lastWpDataSig) {
+        lastWpDataSig = dataSig;
+        customPatrolOrder = customPatrolOrder.filter((idx) => idx >= 0 && idx < wps.length);
+      }
+      const container = document.getElementById('wp-quick-list');
+      if (!container) return;
+      if (!wps.length) {
+        container.innerHTML = '<span class="col-span-3 text-[11px] text-slate-500">등록된 웨이포인트 없음</span>';
+        return;
+      }
+      container.innerHTML = '';
+      wps.forEach((wp, idx) => {
+        const label = wp.name || `WP${idx + 1}`;
+        const wrap = document.createElement('div');
+        wrap.className = wpDeleteMode
+          ? 'flex items-center rounded-lg bg-slate-800 border border-rose-700/70 shadow overflow-hidden'
+          : 'flex items-center rounded-lg bg-slate-800 border border-emerald-700/50 shadow overflow-hidden';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'flex-1 px-2 py-2 text-xs font-bold text-emerald-300 hover:bg-emerald-700/80 hover:text-white active:scale-95 transition truncate text-center';
+        btn.textContent = label;
+        btn.onclick = () => goToWaypoint(idx, label);
+
+        wrap.appendChild(btn);
+
+        if (wpDeleteMode) {
+          const delBtn = document.createElement('button');
+          delBtn.type = 'button';
+          delBtn.title = `${label} 삭제`;
+          delBtn.className = 'px-2 py-2 text-[11px] font-extrabold text-rose-300 hover:bg-rose-600 hover:text-white active:scale-95 transition border-l border-rose-800/60 shrink-0';
+          delBtn.textContent = '✕';
+          delBtn.onclick = () => deleteWaypoint(idx, label);
+          wrap.appendChild(delBtn);
+        }
+
+        container.appendChild(wrap);
+      });
+    }
+
+    function openCustomPatrolModal() {
+      const wps = (mapState && Array.isArray(mapState.waypoints)) ? mapState.waypoints : [];
+      if (!wps.length) {
+        alert('등록된 웨이포인트가 없습니다. 먼저 WP를 추가해 주세요.');
+        return;
+      }
+      customPatrolOrder = customPatrolOrder.filter((idx) => idx >= 0 && idx < wps.length);
+      renderCustomPatrolModal();
+      const modal = document.getElementById('custom-patrol-modal');
+      if (modal) modal.classList.remove('hidden');
+    }
+
+    function closeCustomPatrolModal() {
+      const modal = document.getElementById('custom-patrol-modal');
+      if (modal) modal.classList.add('hidden');
+    }
+
+    function toggleCustomPatrolWp(idx) {
+      const pos = customPatrolOrder.indexOf(idx);
+      if (pos >= 0) customPatrolOrder.splice(pos, 1);
+      else customPatrolOrder.push(idx);
+      renderCustomPatrolModal();
+    }
+
+    function popCustomPatrolWp() {
+      if (customPatrolOrder.length > 0) {
+        customPatrolOrder.pop();
+        renderCustomPatrolModal();
+      }
+    }
+
+    function clearCustomPatrolOrder() {
+      customPatrolOrder = [];
+      renderCustomPatrolModal();
+    }
+
+    function selectAllCustomPatrolOrder() {
+      const wps = (mapState && Array.isArray(mapState.waypoints)) ? mapState.waypoints : [];
+      customPatrolOrder = wps.map((_, i) => i);
+      renderCustomPatrolModal();
+    }
+
+    function renderCustomPatrolModal() {
+      const wps = (mapState && Array.isArray(mapState.waypoints)) ? mapState.waypoints : [];
+      const grid = document.getElementById('cp-wp-grid');
+      const preview = document.getElementById('cp-route-preview');
+      const countEl = document.getElementById('cp-selected-count');
+      const startBtn = document.getElementById('btn-cp-start');
+      if (!grid) return;
+
+      if (countEl) countEl.textContent = String(customPatrolOrder.length);
+      if (startBtn) startBtn.disabled = (customPatrolOrder.length === 0);
+
+      if (preview) {
+        if (customPatrolOrder.length === 0) {
+          preview.className = 'text-xs font-mono text-slate-500 min-h-[20px]';
+          preview.textContent = '아직 선택된 WP가 없습니다.';
+        } else {
+          preview.className = 'text-xs font-mono font-bold text-cyan-300 break-words leading-relaxed min-h-[20px]';
+          const names = customPatrolOrder.map((idx, step) => {
+            const wp = wps[idx];
+            return `${step + 1}.${(wp && wp.name) ? wp.name : ('WP' + (idx + 1))}`;
+          });
+          preview.textContent = names.join(' ➔ ');
+        }
+      }
+
+      grid.innerHTML = '';
+      wps.forEach((wp, idx) => {
+        const label = wp.name || `WP${idx + 1}`;
+        const orderPos = customPatrolOrder.indexOf(idx);
+        const isSelected = (orderPos >= 0);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.onclick = () => toggleCustomPatrolWp(idx);
+        btn.className = isSelected
+          ? 'relative px-2 py-3 rounded-xl text-sm font-extrabold bg-violet-700/80 hover:bg-violet-600 text-white border-2 border-violet-300 shadow-lg active:scale-95 transition flex items-center justify-center gap-1.5'
+          : 'relative px-2 py-3 rounded-xl text-sm font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 active:scale-95 transition flex items-center justify-center gap-1.5';
+
+        if (isSelected) {
+          const badge = document.createElement('span');
+          badge.className = 'inline-flex items-center justify-center w-5 h-5 rounded-full bg-cyan-400 text-slate-950 text-[11px] font-black shrink-0';
+          badge.textContent = String(orderPos + 1);
+          btn.appendChild(badge);
+        }
+
+        const txt = document.createElement('span');
+        txt.className = 'truncate';
+        txt.textContent = label;
+        btn.appendChild(txt);
+
+        grid.appendChild(btn);
+      });
+    }
+
+    async function startCustomPatrol() {
+      if (customPatrolOrder.length === 0) {
+        alert('지정순찰할 웨이포인트를 1개 이상 선택해 주세요.');
+        return;
+      }
+      const startBtn = document.getElementById('btn-cp-start');
+      if (startBtn) startBtn.disabled = true;
+      try {
+        const res = await fetch('/api/patrol', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enable: true, ordered_indices: customPatrolOrder })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          alert(data.message || '지정순찰 시작 실패');
+        } else {
+          closeCustomPatrolModal();
+          pollMapState();
+        }
+      } catch (e) {
+        alert('서버 통신 오류: ' + e);
+      } finally {
+        if (startBtn) startBtn.disabled = (customPatrolOrder.length === 0);
+      }
+    }
+
+    async function deleteWaypoint(idx, name) {
+      if (!confirm(`[${name}] 웨이포인트를 삭제할까요?\n(남은 웨이포인트는 WP1부터 자동 재정렬됩니다)`)) return;
+      try {
+        const res = await fetch('/api/patrol/waypoints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'delete', wp_index: idx })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          alert(data.message || '웨이포인트 삭제 실패');
+        } else {
+          lastWpDataSig = '';
+          lastWpRenderSig = '';
+          pollMapState();
+        }
+      } catch (e) {
+        alert('서버 통신 오류: ' + e);
+      }
+    }
+
+    async function goToWaypoint(idx, name) {
+      if (!confirm(`[${name}] 지점으로 단일 이동할까요?\n(루프 순찰 중이면 자동 중지됩니다)`)) return;
+      localWpGoal = { state: 'SENDING', target: name, wpIndex: idx };
+      updateWpGoalUI(localWpGoal);
+      try {
+        const res = await fetch('/api/nav_goal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wp_index: idx })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          localWpGoal = null;
+          updateWpGoalUI({ state: 'IDLE', target: '' });
+          alert(data.message || '단일 이동 요청 실패');
+        } else {
+          localWpGoal = { state: 'MOVING', target: name, wpIndex: idx };
+          updateWpGoalUI(localWpGoal);
+          pollMapState();
+        }
+      } catch (e) {
+        localWpGoal = null;
+        updateWpGoalUI({ state: 'IDLE', target: '' });
+        alert('서버 통신 오류: ' + e);
+      }
+    }
+
+    async function triggerVlmBriefingMap() {
+      const btn = document.getElementById('map-vlm-btn');
+      const label = document.getElementById('map-vlm-label');
+      if (btn) btn.disabled = true;
+      if (label) label.textContent = '요청...';
+      try {
+        const res = await fetch('/api/vlm/briefing', { method: 'POST' });
+        const result = await res.json();
+        if (result.success) {
+          if (label) label.textContent = '🔊 발화중';
+          setTimeout(() => { if (label) label.textContent = 'VLM'; }, 3000);
+        } else {
+          alert('브리핑 요청 실패: ' + (result.message || '응답 오류'));
+          if (label) label.textContent = 'VLM';
+        }
+      } catch (e) {
+        alert('통신 오류: ' + e);
+        if (label) label.textContent = 'VLM';
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function cancelNavigationMap() {
+      const btn = document.getElementById('btn-map-nav-cancel');
+      const label = document.getElementById('map-nav-cancel-label');
+      if (btn) btn.disabled = true;
+      if (label) label.textContent = '⏸️ 주행 취소 · 브레이크 중...';
+      try {
+        const res = await fetch('/api/nav_cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        const result = await res.json();
+        if (localWpGoal && (localWpGoal.state === 'MOVING' || localWpGoal.state === 'SENDING')) {
+          localWpGoal = { state: 'CANCELED', target: localWpGoal.target, wpIndex: localWpGoal.wpIndex };
+          updateWpGoalUI(localWpGoal);
+        }
+        if (label) {
+          label.textContent = result.success
+            ? '✅ 정지 완료 (토크 유지 · 대기 중)'
+            : '⚠️ 취소 응답 확인';
+        }
+        pollMapState();
+      } catch (e) {
+        alert('주행 취소 통신 실패: ' + e);
+      } finally {
+        setTimeout(() => {
+          if (btn) btn.disabled = false;
+          if (label) label.textContent = '주행 전체 취소 · 브레이크 (토크 유지)';
+        }, 1800);
+      }
+    }
+
+    async function emergencyStopMap() {
+      const btn = document.getElementById('btn-map-estop');
+      const label = document.getElementById('map-estop-label');
+      if (btn) btn.disabled = true;
+      if (label) label.textContent = '🛑 비상 정지 실행 중...';
+      try {
+        await fetch('/api/patrol', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enable: false })
+        }).catch(() => {});
+        const res = await fetch('/api/motor/torque', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enable: false })
+        });
+        const result = await res.json();
+        if (localWpGoal && (localWpGoal.state === 'MOVING' || localWpGoal.state === 'SENDING')) {
+          localWpGoal = { state: 'CANCELED', target: localWpGoal.target, wpIndex: localWpGoal.wpIndex };
+          updateWpGoalUI(localWpGoal);
+        }
+        if (label) {
+          label.textContent = result.success
+            ? '✅ 모터 차단 완료 (E-STOP)'
+            : '⚠️ 차단 응답 확인: ' + (result.message || '오류');
+        }
+        pollMapState();
+      } catch (e) {
+        alert('비상 정지 통신 실패: ' + e);
+      } finally {
+        setTimeout(() => {
+          if (btn) btn.disabled = false;
+          if (label) label.textContent = '비상 정지 (E-STOP)';
+        }, 1500);
+      }
+    }
+
+    async function recoverMotorTorqueMap() {
+      const btn = document.getElementById('btn-map-motor-on');
+      const label = document.getElementById('map-motor-on-label');
+      if (btn) btn.disabled = true;
+      if (label) label.textContent = '복구 중...';
+      try {
+        const res = await fetch('/api/motor/torque', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enable: true })
+        });
+        const result = await res.json();
+        if (label) {
+          label.textContent = result.success ? '✅ ON 완료' : '⚠️ 실패';
+        }
+        if (!result.success) {
+          alert('모터 복구 실패: ' + (result.message || '응답 오류'));
+        }
+        pollMapState();
+      } catch (e) {
+        alert('모터 복구 통신 실패: ' + e);
+      } finally {
+        setTimeout(() => {
+          if (btn) btn.disabled = false;
+          if (label) label.textContent = '모터 ON';
+        }, 1500);
+      }
+    }
+
+    async function setCurrentDock() {
+      try {
+        const res = await fetch('/api/patrol/waypoints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'set_dock' })
+        });
+        const data = await res.json();
+        alert(data.message || (data.success ? '충전소 지정 완료' : '충전소 지정 실패'));
+        if (res.ok && data.success) pollMapState();
+      } catch (e) {
+        alert('서버 통신 오류: ' + e);
+      }
+    }
+
+    async function addCurrentWaypoint() {
+      try {
+        const res = await fetch('/api/patrol/waypoints', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'add_current' })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) alert(data.message || '웨이포인트 추가 실패');
+        else pollMapState();
+      } catch (e) {
+        alert('서버 통신 오류: ' + e);
+      }
+    }
+
+    async function setPatrol(enable) {
+      try {
+        const res = await fetch('/api/patrol', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enable })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) alert(data.message || '순찰 제어 실패');
+        pollMapState();
+      } catch (e) {
+        alert('서버 통신 오류: ' + e);
+      }
+    }
+
+    async function stopNavModeNow(action) {
+      const resetBtn = (action === 'full_reset') ? document.getElementById('btn-full-reset') : null;
+      const defaultResetClass = 'w-full px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-rose-950/70 text-rose-300 hover:text-rose-200 active:scale-95 transition border border-rose-700/60 shadow flex items-center justify-center gap-1.5';
+      const defaultResetHtml = '🔄 주행 전체 초기화 (모터 정지 · 브릿지 재기동)';
+
+      if (resetBtn) {
+        resetBtn.disabled = true;
+        resetBtn.className = 'w-full px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-600 text-white border border-rose-400 shadow animate-pulse flex items-center justify-center gap-1.5';
+        resetBtn.textContent = '🔴 주행 전체 초기화 진행 중...';
+      }
+
+      try {
+        const res = await fetch('/api/nav_mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          updateNavModeUI(action === 'relocalize' ? 'LOCALIZING' : 'IDLE');
+          if (resetBtn) {
+            resetBtn.className = 'w-full px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white border border-emerald-400 shadow flex items-center justify-center gap-1.5';
+            resetBtn.textContent = '✅ 주행 전체 초기화 완료';
+            setTimeout(() => {
+              resetBtn.disabled = false;
+              resetBtn.className = defaultResetClass;
+              resetBtn.textContent = defaultResetHtml;
+            }, 2500);
+          }
+          setTimeout(pollMapState, 1200);
+        } else {
+          if (resetBtn) {
+            resetBtn.disabled = false;
+            resetBtn.className = defaultResetClass;
+            resetBtn.textContent = defaultResetHtml;
+          }
+          alert(data.message || '요청 실패');
+        }
+      } catch (e) {
+        if (resetBtn) {
+          resetBtn.disabled = false;
+          resetBtn.className = defaultResetClass;
+          resetBtn.textContent = defaultResetHtml;
+        }
+        alert('서버 통신 오류: ' + e);
+      }
+    }
+
+    let pendingNavAction = null;
+    function openPinModal(action, label) {
+      pendingNavAction = action;
+      const modal = document.getElementById('pin-modal');
+      const titleEl = document.getElementById('pin-modal-title');
+      const inputEl = document.getElementById('pin-modal-input');
+      const errEl = document.getElementById('pin-modal-error');
+      titleEl.textContent = label + ' — 비밀번호 입력';
+      inputEl.value = '';
+      errEl.textContent = '';
+      errEl.classList.add('hidden');
+      modal.classList.remove('hidden');
+      setTimeout(() => inputEl.focus(), 50);
+    }
+    function closePinModal() {
+      pendingNavAction = null;
+      document.getElementById('pin-modal').classList.add('hidden');
+    }
+    async function submitPinModal() {
+      if (!pendingNavAction) return;
+      const inputEl = document.getElementById('pin-modal-input');
+      const errEl = document.getElementById('pin-modal-error');
+      const submitBtn = document.getElementById('pin-modal-submit');
+      const password = inputEl.value;
+      submitBtn.disabled = true;
+      submitBtn.textContent = '실행 중...';
+      errEl.classList.add('hidden');
+      try {
+        if (pendingNavAction === 'clear_waypoints') {
+          const res = await fetch('/api/patrol/waypoints', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'clear', password })
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            errEl.textContent = data.message || '초기화 실패';
+            errEl.classList.remove('hidden');
+          } else {
+            closePinModal();
+            pollMapState();
+          }
+          return;
+        }
+
+        const res = await fetch('/api/nav_mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: pendingNavAction, password })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          errEl.textContent = data.message || '실행 실패';
+          errEl.classList.remove('hidden');
+        } else {
+          if (pendingNavAction === 'relocalize') updateNavModeUI('LOCALIZING');
+          else if (pendingNavAction === 'nav2_start') updateNavModeUI('NAV2');
+          else if (pendingNavAction === 'slam_start') updateNavModeUI('SLAM');
+          else updateNavModeUI('IDLE');
+          closePinModal();
+          setTimeout(pollMapState, 1500);
+        }
+      } catch (e) {
+        errEl.textContent = '서버 통신 오류: ' + e;
+        errEl.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '확인';
+      }
+    }
+
+    async function pollCamStatus() {
+      try {
+        const res = await fetch('/api/health?t=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const fpsEl = document.getElementById('map-cam-fps');
+        const tagEl = document.getElementById('map-yolo-tag');
+        const fps = data?.tier3_laptop?.fps ?? 0;
+        const camAlive = fps > 0;
+        const yoloAlive = data?.tier2_jetson?.status === 'ONLINE';
+        const detected = data?.tier2_jetson?.detected_objects || '없음';
+
+        const hvBar = document.getElementById('header-voltage-bar');
+        const driveBadge = document.getElementById('drive-ready-badge');
+        if (driveBadge) {
+          const oc = data.tier1_opencr;
+          if (!oc || oc.status !== 'ONLINE') {
+            driveBadge.className = 'px-2.5 py-1.5 rounded-lg bg-rose-950/80 border border-rose-700 text-rose-300 font-bold truncate';
+            driveBadge.textContent = '🔴 주행 불가능 (OpenCR OFF)';
+          } else if (!oc.is_switch_on) {
+            driveBadge.className = 'px-2.5 py-1.5 rounded-lg bg-rose-950/80 border border-rose-700 text-rose-300 font-bold truncate';
+            driveBadge.textContent = '🔴 주행 불가능 (스위치 OFF)';
+          } else if (!oc.torque) {
+            driveBadge.className = 'px-2.5 py-1.5 rounded-lg bg-rose-950/80 border border-rose-700 text-rose-300 font-bold truncate';
+            driveBadge.textContent = '🔴 주행 불가능 (토크 OFF)';
+          } else {
+            driveBadge.className = 'px-2.5 py-1.5 rounded-lg bg-emerald-950/70 border border-emerald-600/70 text-emerald-300 font-bold truncate';
+            driveBadge.textContent = '🟢 주행 가능한 상태입니다';
+          }
+        }
+        if (hvBar) {
+          if (!data.tier1_opencr || data.tier1_opencr.status !== 'ONLINE') {
+            hvBar.className = 'text-xs px-2.5 py-1 rounded-lg font-mono font-bold bg-rose-950/80 text-rose-300 border border-rose-700 whitespace-nowrap';
+            hvBar.textContent = '🔴 OpenCR OFF';
+          } else {
+            const v = data.tier1_opencr.voltage || 0.0;
+            const isOk = v > 9.0;
+            const pct = Math.min(100, Math.max(0, Math.round(((v - 10.5) / (12.5 - 10.5)) * 100)));
+            if (!isOk) {
+              hvBar.className = 'text-xs px-2.5 py-1 rounded-lg font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700 whitespace-nowrap';
+              hvBar.textContent = `🔌 스위치 OFF (${v.toFixed(2)}V)`;
+            } else if (v <= 10.8) {
+              hvBar.className = 'text-xs px-2.5 py-1 rounded-lg font-mono font-bold bg-rose-950/90 text-rose-300 border border-rose-500 animate-pulse whitespace-nowrap';
+              hvBar.textContent = `🚨 ${v.toFixed(2)}V (${pct}%) 즉시종료`;
+            } else if (v <= 11.0) {
+              hvBar.className = 'text-xs px-2.5 py-1 rounded-lg font-mono font-bold bg-amber-950/80 text-amber-300 border border-amber-500/80 whitespace-nowrap';
+              hvBar.textContent = `⚠️ ${v.toFixed(2)}V (${pct}%) 주의`;
+            } else {
+              hvBar.className = 'text-xs px-2.5 py-1 rounded-lg font-mono font-bold bg-emerald-950/60 text-emerald-300 border border-emerald-700/70 whitespace-nowrap';
+              hvBar.textContent = `🔋 ${v.toFixed(2)}V (${pct}%) 정상`;
+            }
+          }
+        }
+
+        fpsEl.textContent = `${fps} FPS`;
+        fpsEl.className = camAlive
+          ? 'text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-emerald-400 border border-slate-800 font-mono font-bold'
+          : 'text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-rose-400 border border-rose-900 font-mono font-bold';
+
+        if (!camAlive) {
+          tagEl.className = 'px-2.5 py-1 bg-rose-950/90 border-t border-rose-900 text-[11px] font-mono text-rose-300 truncate font-bold';
+          tagEl.textContent = '🔴 NO SIGNAL (Pi 5 카메라 미연결)';
+        } else if (!yoloAlive) {
+          tagEl.className = 'px-2.5 py-1 bg-amber-950/90 border-t border-amber-800 text-[11px] font-mono text-amber-300 truncate';
+          tagEl.textContent = '영상 수신 중 (Jetson YOLO 미연결)';
+        } else {
+          tagEl.className = 'px-2.5 py-1 bg-slate-950/95 border-t border-slate-800 text-[11px] font-mono text-cyan-300 truncate';
+          tagEl.textContent = `감지: ${detected}`;
+        }
+      } catch (_) {}
+    }
+
+    loadMapView();
+    resizeCanvas();
+    pollMapState();
+    pollCamStatus();
+    function switchControlTab(tab) {
+      const tabs = ['wp', 'hazard'];
+      tabs.forEach((t) => {
+        const panel = document.getElementById('tab-panel-' + t);
+        const btn = document.getElementById('tab-btn-' + t);
+        const active = (t === tab);
+        if (panel) panel.classList.toggle('hidden', !active);
+        if (btn) {
+          btn.className = active
+            ? 'py-1.5 rounded-lg text-xs font-bold bg-cyan-600 text-white shadow transition'
+            : 'py-1.5 rounded-lg text-xs font-bold text-slate-400 hover:text-slate-200 transition';
+        }
+      });
+    }
+
+    setInterval(pollMapState, 1000);
+    setInterval(pollCamStatus, 1000);
+  </script>
+  <script src="/yolo_overlay.js"></script>
+  <script>
+    if (window.attachYoloOverlay) {
+      window.attachYoloOverlay({
+        imgId: 'map-mjpeg-stream',
+        canvasId: 'map-yolo-overlay-canvas',
+        pollMs: 150
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# ROS 2 Build Artifacts
+build/
+install/
+log/
+COLCON_IGNORE
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Editors & OS
+.vscode/
+.idea/
+.obsidian/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.bak*
+*.old
+*.7z
+*.tar.gz
+*.zip
+
+# OPSEC / Personal Docs
+docs/이력서/

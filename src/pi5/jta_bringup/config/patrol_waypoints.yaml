@@ -1,0 +1,44 @@
+patrol:
+  dwell_sec: 2.0
+  retry_limit: 1
+  custom_order: []
+  waypoints:
+  - name: WP1
+    x: -0.246
+    y: -1.865
+    yaw: 0.014
+    enabled: true
+  - name: WP2
+    x: 2.391
+    y: -1.887
+    yaw: 1.558
+    enabled: true
+  - name: WP3
+    x: 3.297
+    y: 0.37
+    yaw: 1.5
+    enabled: true
+  - name: WP4
+    x: 2.676
+    y: 2.203
+    yaw: -2.546
+    enabled: true
+  - name: WP5
+    x: -0.584
+    y: 1.252
+    yaw: -3.055
+    enabled: true
+  - name: WP6
+    x: -2.757
+    y: 1.236
+    yaw: 0.008
+    enabled: true
+  - name: WP7
+    x: -1.776
+    y: -1.876
+    yaw: -3.029
+    enabled: true
+  dock:
+    x: -0.293
+    y: -1.602
+    yaw: -0.345

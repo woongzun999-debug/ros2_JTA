@@ -1,0 +1,20 @@
+# ==============================================================================
+# 🧠 [Tier 2 Jetson Orin Nano] VLM 4-bit NF4 경량화 의존성 명세서 (Frozen)
+# ------------------------------------------------------------------------------
+# • 검증 일자: 2026-11-10
+# • 기기 환경: Jetson Orin Nano Super (8GB) + Docker my_ros2_robot:humble
+# • 베이스라인: CUDA 12.6 + PyTorch 2.8.0 + ROS 2 Humble
+# • 적용 모델: Qwen/Qwen2-VL-2B-Instruct (4-bit NF4, VRAM 1.42GB 실증 완료)
+# ==============================================================================
+
+# Core Deep Learning Framework
+torch==2.8.0
+torchvision==0.23.0
+numpy==1.26.4
+opencv-python==4.14.0.94
+
+# HuggingFace & 4-bit Quantization (BitsAndBytes NF4)
+transformers==5.20.2
+accelerate==1.15.0
+bitsandbytes==0.50.2
+qwen-vl-utils==0.0.14

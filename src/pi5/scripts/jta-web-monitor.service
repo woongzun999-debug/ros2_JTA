@@ -1,0 +1,24 @@
+[Unit]
+Description=JTA Bot WebUI Cockpit Server (:9999) on Pi 5 (Distrobox humble)
+After=network-online.target user@1000.service
+Wants=network-online.target user@1000.service
+
+[Service]
+Type=simple
+User=<PI_USER>
+Group=<PI_USER>
+WorkingDirectory=<PI_HOME>/jta_web
+Environment=HOME=<PI_HOME>
+Environment=USER=<PI_USER>
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStartPre=-/usr/bin/pkill -f "^python3 <PI_HOME>/jta_web/web_monitor_server\.py"
+ExecStart=/usr/bin/distrobox enter humble -- <PI_HOME>/inner_webui_launch.sh
+ExecStopPost=-/usr/bin/pkill -f "^python3 <PI_HOME>/jta_web/web_monitor_server\.py"
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[
+  {
+    "type": "detect",
+    "shape": "rect",
+    "x1": 1.037,
+    "y1": 2.562,
+    "x2": 3.457,
+    "y2": 0.487,
+    "thickness": 0.15,
+    "speed_pct": 40
+  },
+  {
+    "type": "detect",
+    "shape": "rect",
+    "x1": 1.308,
+    "y1": -0.869,
+    "x2": 3.644,
+    "y2": -2.774,
+    "thickness": 0.15,
+    "speed_pct": 40
+  }
+]

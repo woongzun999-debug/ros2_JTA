@@ -1,0 +1,16 @@
+[Unit]
+Description=Jetson Network Failover (Ethernet to WiFi with Fixed IP <JETSON_IP>)
+After=network.target NetworkManager.service systemd-resolved.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /usr/local/bin/network-failover.py
+Restart=always
+RestartSec=3
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
