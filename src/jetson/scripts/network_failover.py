@@ -69,7 +69,7 @@ def get_mac(iface):
 
 def has_ip(iface, ip):
     ok, out = run_cmd(["ip", "-4", "-brief", "addr", "show", "dev", iface])
-    return ip in out
+    return f"{ip}/" in out
 
 def send_garp(iface, ip):
     mac = get_mac(iface)
@@ -122,6 +122,10 @@ def send_garp(iface, ip):
 def switch_to_backup():
     logging.warning("=== [FAILOVER TRIGGERED] Primary Ethernet down! ===")
     logging.info(f"Transitioning {TARGET_IP} to WiFi ({BACKUP_IFACE})...")
+
+    # Remove IP from downed Ethernet to avoid duplicate connected subnet route / DDS binding ambiguity
+    if has_ip(PRIMARY_IFACE, TARGET_IP):
+        run_cmd(["ip", "addr", "del", f"{TARGET_IP}/{CIDR}", "dev", PRIMARY_IFACE])
 
     # Add IP to WiFi
     if not has_ip(BACKUP_IFACE, TARGET_IP):
@@ -187,7 +191,7 @@ def main():
     while running:
         time.sleep(CHECK_INTERVAL)
         carrier = get_carrier(PRIMARY_IFACE)
-        now = time.time()
+        now = time.monotonic()
 
         target_state = "primary" if carrier else "backup"
 

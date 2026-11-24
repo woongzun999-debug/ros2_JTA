@@ -22,10 +22,10 @@ class JetsonYoloNode(Node):
     def __init__(self):
         super().__init__('yolo_detector')
 
-        # 1. ROS 2 파라미터 선언
-        self.declare_parameter('model', '/root/ros2_ws/yolo11n.pt')
-        self.declare_parameter('imgsz', 480)
-        self.declare_parameter('conf', 0.35)
+        # 1. ROS 2 파라미터 선언 (yolo11n.launch.py 실기 표준과 일치: yolo11s.pt / 640 / 0.60)
+        self.declare_parameter('model', '/root/ros2_ws/yolo11s.pt')
+        self.declare_parameter('imgsz', 640)
+        self.declare_parameter('conf', 0.60)
         self.declare_parameter('use_compressed', True)
         self.declare_parameter('publish_annotated', False)
 
@@ -91,8 +91,60 @@ class JetsonYoloNode(Node):
         )
         self.zone_hb_timer = self.create_timer(1.0, self._zone_heartbeat_callback)
 
+        # Jetson 실시간 시스템 텔레메트리 발행 (/jetson/system_state, 2초 주기, /proc/meminfo 실측)
+        self.pub_sys_state = self.create_publisher(String, '/jetson/system_state', 5)
+        self.sys_state_timer = self.create_timer(2.0, self._publish_system_state)
+        self._publish_system_state()
+
         self.processing = False
         self.get_logger().info(f">>> [YOLO11n] {sub_topic} 수신 대기 중...")
+
+    def _publish_system_state(self):
+        """Jetson 통합 RAM · Swap · 온도 실측치를 /jetson/system_state JSON으로 발행."""
+        try:
+            mem = {}
+            with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        mem[parts[0].rstrip(':')] = int(parts[1])  # kB
+            total_kb = mem.get('MemTotal', 0)
+            avail_kb = mem.get('MemAvailable', mem.get('MemFree', 0))
+            used_kb = max(0, total_kb - avail_kb)
+            swap_total_kb = mem.get('SwapTotal', 0)
+            swap_free_kb = mem.get('SwapFree', 0)
+            swap_used_kb = max(0, swap_total_kb - swap_free_kb)
+
+            ram_total_gb = round(total_kb / (1024.0 * 1024.0), 1)
+            ram_used_gb = round(used_kb / (1024.0 * 1024.0), 1)
+            ram_pct = round((used_kb / total_kb) * 100.0, 1) if total_kb > 0 else 0.0
+            swap_total_gb = round(swap_total_kb / (1024.0 * 1024.0), 1)
+            swap_used_mb = int(round(swap_used_kb / 1024.0))
+
+            temp_c = None
+            for tz in range(8):
+                tpath = f'/sys/devices/virtual/thermal/thermal_zone{tz}/temp'
+                npath = f'/sys/devices/virtual/thermal/thermal_zone{tz}/type'
+                if os.path.exists(tpath) and os.path.exists(npath):
+                    tname = open(npath, 'r', encoding='utf-8').read().strip().lower()
+                    if 'cpu' in tname or 'gpu' in tname or 'tj' in tname:
+                        val = int(open(tpath, 'r', encoding='utf-8').read().strip())
+                        c = round(val / 1000.0, 1) if val > 200 else float(val)
+                        if temp_c is None or c > temp_c:
+                            temp_c = c
+
+            msg = String()
+            msg.data = json.dumps({
+                'ram_total_gb': ram_total_gb,
+                'ram_used_gb': ram_used_gb,
+                'ram_pct': ram_pct,
+                'swap_total_gb': swap_total_gb,
+                'swap_used_mb': swap_used_mb,
+                'temp_c': temp_c,
+            })
+            self.pub_sys_state.publish(msg)
+        except Exception:
+            pass
 
     def _zone_heartbeat_callback(self):
         if not self.zone_enable:

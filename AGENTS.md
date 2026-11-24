@@ -31,7 +31,7 @@
 | Tier | 기기명 | IP&nbsp;/&nbsp;SSH | 계정 | 실행&nbsp;환경 | 소스&nbsp;위치 | 주요 역할 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Tier&nbsp;1** | **Raspberry Pi 5** (+ OpenCR 1.0) | `<PI5_IP>:22` | `<PI_USER>` | 호스트(카메라) + Distrobox `humble` | `src/pi5/` | CSI 카메라(`jta_camera`), LDS-01 LiDAR, OpenCR(`/dev/ttyACM0`), USB 스피커 |
-| **Tier&nbsp;2** | **Jetson Orin Nano** | `<JETSON_IP>:2222` | `<JETSON_USER>` | Docker `my_ros2_robot:humble` | `src/jetson/` | GPU 가속 `yolo11n`, `Qwen2-VL-2B` VLM, 상시 바닥장애물(`/vision/scan`), ArUco·한손 제어(`/gesture/cmd`) |
+| **Tier&nbsp;2** | **Jetson Orin Nano** | `<JETSON_IP>:2222` | `<JETSON_USER>` | Docker `my_ros2_robot:humble` | `src/jetson/` | GPU 가속 `yolo11s`(표준)/`yolo11n`, `Qwen2-VL-2B` VLM(순수 On-Demand), 상시 바닥장애물(`/vision/scan`), ArUco·한손 제어(`/gesture/cmd`) |
 | **Tier&nbsp;3** | **Control Laptop** | `<LAPTOP_IP>` | `<LAPTOP_USER>` | Docker `ros2basic.sh` | `src/laptop/` | Lichtblick(`:8765`, `foxglove-bridge.service`) / RViz2 관제, WebUI(`:9999` Nav2/SLAM·`/map`·순찰), Git(`:5555`/`:9418`), Docs(`:7777`) |
 
 * **ROS 2 / DDS**: ROS 2 Humble, `ROS_DOMAIN_ID=30`, **CycloneDDS Unicast Peer (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `config/cyclonedds.xml`)** 표준 (`config/fastdds_unicast.xml`은 레거시/폴백용).
@@ -48,7 +48,11 @@
 | `/cmd_vel` | `geometry_msgs/msg/Twist` | Nav2 / 회피 노드 | Tier 1 (`turtlebot3_node`) | `depth=10`, 종료 시 `0.0` 속도 5회 이상 발행 |
 | `/yolo/image_annotated` | `sensor_msgs/msg/Image` | Tier 2 (`yolo_detector`) | Tier 3 (RViz2) | `depth=1`, `bgr8` (옵션 발행) |
 | `/yolo/image_annotated/compressed` | `sensor_msgs/msg/CompressedImage` | Tier 2 (`yolo_detector`) | Tier 3 (옵션) | `depth=1`, `format='jpeg'`, Quality 75 |
-| `/yolo/detections` | `std_msgs/msg/String` | Tier 2 (`yolo_detector`) | Tier 2 (VLM), Tier 3 (WebUI) | `depth=10`, JSON 포맷 (`class_name`, `conf`, `box`, `center`) |
+| `/yolo/detections` | `std_msgs/msg/String` | Tier 2 (`yolo_detector`) | Tier 2 (VLM), Tier 1 (`patrol_node`), Tier 3 (WebUI) | `depth=10`, JSON 포맷 (`class_name`, `conf`, `box`, `center`, `size`) |
+| `/yolo/zone_enable` | `std_msgs/msg/Bool` | Tier 1 (`web_monitor_server` 마스터) | Tier 2 (`yolo_detector`), Tier 1 (`patrol_node`) | `depth=10`, 사람탐지 구역 ON/OFF 제어 |
+| `/pi5/battery_state` | `sensor_msgs/msg/BatteryState` | Tier 1 (`pi5_power_node`) | Tier 1/3 (WebUI/HUD) | `depth=10`, Pi 5 5V PD 전압·온도 |
+| `/pi5/system_state` | `std_msgs/msg/String` | Tier 1 (`pi5_power_node`) | Tier 1/3 (WebUI) | `depth=10`, JSON 실측 `throttled` 비트마스크·전압·온도 (1Hz) |
+| `/jetson/system_state` | `std_msgs/msg/String` | Tier 2 (`yolo_detector`) | Tier 1/3 (WebUI) | `depth=5`, JSON `/proc/meminfo` 실측 RAM·Swap·온도 (0.5Hz) |
 | `/patrol/status` | `std_msgs/msg/String` | Tier 1 (`jta_patrol_node`) | Tier 3 (WebUI `/map`) | `depth=10`, JSON 순찰 상태 (`IDLE`/`RUNNING` 등), `/patrol/set_enabled` 서비스 연동 |
 | `/lidar_enable` | `std_msgs/msg/Bool` | 관제/제어 노드 | Tier 1 (`lidar_manager`) | `depth=10`, LiDAR 모터 ON/OFF |
 | `/play/sound` | `std_msgs/msg/String` | Tier 2 (YOLO 트리거), Tier 3 (WebUI) | Tier 1 (`speaker_node`) | `depth=10`, 파일 경로 또는 별칭(`dobingda` Edge-TTS 안내 음성, `neon`) |
@@ -59,7 +63,7 @@
 | `/vlm/chat_query` | `std_msgs/msg/String` | Tier 3 (CLI `qss`) | Tier 2 (`vlm_service_node`) | `depth=10`, CLI 전용 조용한 VLM 질의 (스피커 미발화) |
 | `/vlm/chat_response` | `std_msgs/msg/String` | Tier 2 (`vlm_service_node`) | Tier 3 (CLI `qss`) | `depth=10`, CLI 전용 VLM 텍스트 응답 |
 | `/tts/say` | `std_msgs/msg/String` | Tier 2/3 | Tier 1 (`speaker_node`) | `depth=10`, 정제기 경유 한국어 TTS 발화 |
-| `/vision/scan` | `sensor_msgs/msg/LaserScan` | Tier 2 (`floor_obstacle_node`) | Tier 1 (`nav2 local_costmap`) | **`BEST_EFFORT`** (`depth=5`), 전방 `±33°` 67빔 바닥 장애물 가상 라이다 (`confirm=2f`, `hold=0.8s`) |
+| `/vision/scan` | `sensor_msgs/msg/LaserScan` | Tier 2 (`floor_obstacle_node`) | Tier 1 (`nav2 local_costmap` `vision_obstacle_layer`) | **`BEST_EFFORT`** (`depth=5`), 전방 `±33°` 67빔 바닥 장애물 가상 라이다 (`confirm=4f`, `hold=0.0s`, `pad=±3cm`) |
 | `/vision/floor_obstacles` | `std_msgs/msg/String` | Tier 2 (`floor_obstacle_node`) | Tier 1/3 (WebUI `<canvas>`) | `depth=5`, JSON (`roi_top_ratio`, `confirmed_beams`, `min_dist`, `boxes`) |
 | `/gesture/cmd` | `std_msgs/msg/String` | Tier 2 (`gesture_node`) | Tier 1 (`patrol_node`, `web_monitor_server`) | `depth=10`, JSON (`ESTOP`, `GOTO_WP` ArUco `0~10` / `NAV2_START` 👍 / `NAV2_STOP` ✋) |
 | `/gesture/state` | `std_msgs/msg/String` | Tier 2 (`gesture_node`) | Tier 1/3 (WebUI `<canvas>`) | `depth=10`, JSON 실시간 홀드 진행률 (`0.15s` 주기) |

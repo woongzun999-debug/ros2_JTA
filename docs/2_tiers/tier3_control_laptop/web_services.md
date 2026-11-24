@@ -21,7 +21,8 @@
 | `v1.4.7` | 26.11.19 | ROS2_JW | Approved | • `/api/patrol` 선택 WP(`selected_indices`), `LOCALIZING`(`위치 찾기 중...`) 배지, `FOLLOWING`·순찰 목표 배지 우선순위 교정 |
 | `v1.4.8` | 26.11.20 | ROS2_JW | Approved | • 원본 JPEG 패스스루(`/video_feed`) + 브라우저 `<canvas>` YOLO 오버레이(`/api/yolo`, `yolo_overlay.js`)<br>• `IS_PI5_LOCAL` Pi 5(`<PI5_IP>:9999`) 듀얼 모드<br>• 지정순찰모드(`custom_order`) 및 `/map` 모바일 세로 스크롤 교정 |
 | `v1.4.9` | 26.11.23 | ROS2_JW | Approved | • `<canvas>` 바닥장애물(`/vision/floor_obstacles`)·제스처/ArUco 진행 배지 오버레이<br>• 👍 Nav2+자동순찰/✋ Nav2 종료 비동기 핸들러<br>• `🔌 현재 위치 충전소 지정`(`set_dock`) 및 OpenCR `NO_CONNECT` 시 상단 `🔴 OpenCR OFF` 교정 반영 |
-| **`v1.4.10`** | 26.11.24 | **ROS2_JW** | **Approved** | • Pi 5 `:9999` `jta-web-monitor.service` & `inner_webui_launch.sh` 레포 1:1 백업 경로 링크 동기화 |
+| `v1.4.10` | 26.11.24 | ROS2_JW | Approved | • Pi 5 `:9999` `jta-web-monitor.service` & `inner_webui_launch.sh` 레포 1:1 백업 경로 링크 동기화 |
+| **`v1.4.12`** | 26.11.24 | **ROS2_JW** | **Approved** | • 원자적 비상정지(`POST /api/estop`), 로컬 `/tailwind.js`(398KB) 100% 오프라인화, `Condition` 이벤트 기반 MJPEG, `mtime` 캐싱, SLAM `tf2_ros` 폴백, `IS_WEB_MASTER` 게이트<br>• `/api/yolo` 사람 카운트다운 HUD(`3s/30s/50s`), 실측 `/pi5/system_state`·`/jetson/system_state` 텔레메트리, Keepout `0.15m`·`turn_seq` 경합 방지 반영 |
 | `v2.0.0` | (예정) | ROS2_JW | 계획&nbsp;(Planned) | • 의자 다리 학습용 합성 이미지 생성 및 RTX 4070 VLM 오토 라벨링 수록 |
 
 ---
@@ -135,8 +136,10 @@ docker run -it --rm \
 | :--- | :--- | :--- |
 | **`/camera/image_raw/compressed`** | 라즈베리파이 5 (`<PI5_IP>`) | WebUI / Lichtblick / RViz2: 640x480 JPEG(Q90) 15 FPS 실시간 전방 카메라 스트림 (`/camera/image_raw` On-Demand) |
 | **`/yolo/image_annotated`** | Jetson Orin Nano (`<JETSON_IP>`) | RViz2 `Image` 디스플레이: GPU 가속 바운딩 박스가 그려진 AI 인식 결과 영상 |
-| **`/yolo/detections`** | Jetson Orin Nano (`<JETSON_IP>`) | 텍스트 수신 모니터링 및 향후 로컬 LLM 추론 입력 |
-| **`/scan`** | 라즈베리파이 5 (`<PI5_IP>`) | RViz2 `LaserScan` 디스플레이: 360도 2D 레이저 점군 3D 뷰 |
+| **`/yolo/detections`** | Jetson Orin Nano (`<JETSON_IP>`) | WebUI `<canvas>` 오버레이(`/api/yolo`, 사람 카운트다운 HUD) 및 텍스트 모니터링 |
+| **`/vision/floor_obstacles`, `/gesture/state`** | Jetson Orin Nano (`<JETSON_IP>`) | WebUI `<canvas>` 바닥장애물 마커 및 ArUco/한손 제스처 진행 배지 표출 |
+| **`/pi5/system_state`, `/jetson/system_state`** | Pi 5 (`<PI5_IP>`) / Jetson (`<JETSON_IP>`) | WebUI 대시보드 실측 `vcgencmd get_throttled`(Pi 5) · RAM/Swap/온도(Jetson) 실시간 표출 |
+| **`/scan`** | 라즈베리파이 5 (`<PI5_IP>`) | RViz2 / WebUI 2D 맵(`tf2` SLAM 폴백): 360도 2D 레이저 점군 뷰 |
 | **`/odom`, `/tf`** | 라즈베리파이 5 (`<PI5_IP>`) | RViz2 `RobotModel` & `TF`: 로봇의 실시간 3D 자세 및 주행 궤적 표출 |
 | **`/cmd_vel`** | 관제 노트북 (노트북 직접 발행) | `teleop_twist_keyboard`를 통한 비상 원격 수동 주행 제어 |
 
@@ -159,7 +162,7 @@ docker run -it --rm \
 | 포트 | 서비스명 | systemd 유닛 / 실행 파일 | 엔지니어링 역할 및 주요 기능 |
 | :---: | :---: | :--- | :--- |
 | **`:5555`** | **Git&nbsp;Web&nbsp;Viewer** | `git-web-viewer.service`<br>[`~/.local/bin/git_web_viewer.py`](file://~/.local/bin/git_web_viewer.py) | • **깃 커밋 & 브랜치 시각화**: `ros2_JTA` 전체 커밋 히스토리 및 브랜치 분기점 웹 뷰어<br>• **코드 Diff 및 파일 트리**: 브라우저에서 작업 변경점 및 소스 코드 실시간 열람 |
-| **`:7777`** | **Markdown&nbsp;Docs&nbsp;Viewer** | `md-viewer.service`<br>[`~/.local/bin/md_viewer.py`](file://~/.local/bin/md_viewer.py) | • **프로젝트 문서화 포털**: `docs/spec/` 하드웨어/소프트웨어 전체 명세서 렌더링<br>• **작업 일지 뷰어**: `docs/daily_review/` 일일 개발 일지 목차 및 내용 탐색 |
-| **`:9999`** | **JTA&nbsp;WebUI** | Pi 5 [`src/pi5/scripts/jta-web-monitor.service`](../../../src/pi5/scripts/jta-web-monitor.service) (`User=<PI_USER>`, `Restart=always`, `RestartSec=5`, `ExecStartPre`/`ExecStopPost` 포트 정리 ➔ [`src/pi5/scripts/inner_webui_launch.sh`](../../../src/pi5/scripts/inner_webui_launch.sh) Distrobox `humble` + CycloneDDS ➔ `~/jta_web/web_monitor_server.py`)<br>[`src/laptop/web/web_monitor_server.py`](../../../src/laptop/web/web_monitor_server.py) | • **Pi 5(`:9999`) 독립 호스팅 & `<canvas>` 오버레이**: 원본 JPEG 패스스루(`/video_feed`) + `/api/yolo` (`yolo_overlay.js`: YOLO 박스 + 바닥장애물 `/vision/floor_obstacles` + ArUco/제스처 진행 배지), `0.0.0.0:9999 LISTEN` · `/api/health` `ALL_GREEN`<br>• **`/` 기본 실시간 맵 & `/dashboard` VLM 채팅**: `WP`/`위험구간` 2-Tab, `custom_order` 지정순찰, `🔌 현재 위치 충전소 지정`(`set_dock`), 👍/✋ 비동기 Nav2·자동순찰 제어, PIN 인증 인터락<br>• **3.0초 Watchdog & 단절 교정**: OpenCR `NO_CONNECT` 전환 시 잔여 전압 `0.0V` 초기화 및 상단바 즉시 `🔴 OpenCR OFF` 표출 |
-| **`:9418`** | **Git&nbsp;Network&nbsp;Daemon** | `git-daemon.service`<br>`/usr/lib/git-core/git-daemon` | • **로봇 기기 간 무인 Git 동기화**: 라즈베리파이(`18`)와 젯슨(`13`)에서 계정 비밀번호 없이 초고속 `git clone / pull` 지원 |
+| **`:7777`** | **Markdown&nbsp;Docs&nbsp;Viewer** | `md-viewer.service`<br>[`~/.local/bin/md_viewer.py`](file://~/.local/bin/md_viewer.py) | • **프로젝트 문서화 포털**: `docs/1_master/` · `docs/2_tiers/` 전체 명세서 렌더링<br>• **작업 일지 뷰어**: `docs/3_daily_review/` 일일 개발 일지 목차 및 내용 탐색 |
+| **`:9999`** | **JTA&nbsp;WebUI** | Pi 5 [`src/pi5/scripts/jta-web-monitor.service`](../../../src/pi5/scripts/jta-web-monitor.service) (`User=<PI_USER>`, `Restart=always`, `RestartSec=5`, `ExecStartPre`/`ExecStopPost` 포트 정리 ➔ [`src/pi5/scripts/inner_webui_launch.sh`](../../../src/pi5/scripts/inner_webui_launch.sh) Distrobox `humble` + CycloneDDS ➔ `~/jta_web/web_monitor_server.py`)<br>[`src/laptop/web/web_monitor_server.py`](../../../src/laptop/web/web_monitor_server.py) | • **Pi 5(`:9999`) 독립 호스팅 & 100% 오프라인 동작 (`v1.4.12`)**: 외부 CDN 제거 후 로컬 `/tailwind.js`(398KB) 서빙, `IS_WEB_MASTER` 게이트로 Pi 5/노트북 듀얼 WebUI 제스처 중복 충돌 차단<br>• **고성능 스트리밍 & `<canvas>` HUD**: `threading.Condition` 이벤트 기반 원본 JPEG 패스스루(`/video_feed`) + `mtime` 파일 캐싱 + `/api/yolo` (`yolo_overlay.js`: YOLO 박스 + 바닥장애물 + ArUco/제스처 진행 배지 + **사람 감지 카운트다운 HUD `3s/30s/50s`**)<br>• **원자적 안전 제어 & SLAM/맵 정합**: `POST /api/estop` 원자적 비상정지(순찰·Nav2 취소 + `/cmd_vel=0` ×5 + 토크 OFF), `nav2_start`/`slam_start` 사전 정지, `tf2_ros`(`map->base_footprint`) SLAM 실시간 위치/라이다 폴백, Keepout 선분 폭 `0.15m` 정합, `turn_seq` 선회-주행 경합 방지<br>• **3.0초 Watchdog & 실측 텔레메트리**: OpenCR `NO_CONNECT` 전환 시 즉시 `🔴 OpenCR OFF` 초기화, `/pi5/system_state`(실측 `vcgencmd get_throttled` hex·한국어 라벨) 및 `/jetson/system_state`(실측 RAM/Swap/온도) 표출 |
+| **`:9418`** | **Git&nbsp;Network&nbsp;Daemon** | `git-daemon.service`<br>`/usr/lib/git-core/git-daemon` | • **로봇 기기 간 무인 Git 동기화**: Pi 5(`<PI5_IP>`)와 Jetson(`<JETSON_IP>`)에서 계정 비밀번호 없이 초고속 `git clone / pull` 지원 |
 

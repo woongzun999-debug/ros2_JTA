@@ -4,10 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>JTA Bot 3-Tier 통합 관제 대시보드 (:9999)</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/tailwind.js"></script>
   <style>
-    -webkit-tap-highlight-color: transparent;
     body {
+      -webkit-tap-highlight-color: transparent;
       background-color: #0b0f19;
       color: #e2e8f0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -415,7 +415,18 @@
             document.getElementById('pi5-temp').textContent = (data.tier1_pi5.temp ? data.tier1_pi5.temp.toFixed(1) + ' °C' : '-- °C');
             document.getElementById('pi5-lidar-status').textContent = data.tier1_pi5.lidar_status || '정상';
             document.getElementById('pi5-lidar-status').className = 'font-mono text-cyan-400';
-            document.getElementById('pi5-throttled').textContent = data.tier1_pi5.throttled || '0x0 (정상)';
+            const throttledStr = data.tier1_pi5.throttled || '측정 대기 중';
+            const throttledEl = document.getElementById('pi5-throttled');
+            throttledEl.textContent = throttledStr;
+            if (throttledStr.includes('🚨')) {
+              throttledEl.className = 'font-mono text-rose-400 font-bold animate-pulse';
+            } else if (throttledStr.includes('⚠️')) {
+              throttledEl.className = 'font-mono text-amber-400 font-bold';
+            } else if (throttledStr.startsWith('0x0')) {
+              throttledEl.className = 'font-mono text-emerald-400';
+            } else {
+              throttledEl.className = 'font-mono text-slate-400';
+            }
             if (headPi5) {
               headPi5.className = 'px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1.5 transition-colors';
               headPi5.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400"></span>Pi 5: ONLINE';
@@ -584,6 +595,18 @@
             jetsonPill.className = 'text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-semibold font-mono';
             jetsonPill.textContent = (data.tier2_jetson.ip || '{JETSON_IP}');
             document.getElementById('jetson-ram-text').textContent = `${data.tier2_jetson.ram_used} / ${data.tier2_jetson.ram_total}`;
+            const ramBar = document.getElementById('jetson-ram-bar');
+            if (ramBar && Number.isFinite(Number(data.tier2_jetson.ram_pct))) {
+              const pct = Math.max(0, Math.min(100, Number(data.tier2_jetson.ram_pct)));
+              ramBar.style.width = `${pct}%`;
+              ramBar.className = pct >= 85
+                ? 'bg-rose-500 h-full transition-all duration-500'
+                : (pct >= 70 ? 'bg-amber-400 h-full transition-all duration-500' : 'bg-cyan-500 h-full transition-all duration-500');
+            }
+            const swapEl = document.getElementById('jetson-swap');
+            if (swapEl && data.tier2_jetson.swap_total) {
+              swapEl.textContent = `${data.tier2_jetson.swap_total} (${data.tier2_jetson.swap_used || '0 MB'} 사용)`;
+            }
             document.getElementById('jetson-detections-text').textContent = data.tier2_jetson.detected_objects || '없음';
             document.getElementById('jetson-detections-text').className = 'font-mono text-amber-300 truncate max-w-[130px]';
             if (headJetson) {
@@ -627,7 +650,12 @@
           streamOverlayTag.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-500"></span><span>카메라 피드 수신 중 (Jetson AI NO CONNECT)</span>';
         } else {
           streamOverlayTag.className = 'px-3 py-1.5 rounded-lg text-xs text-cyan-300 font-mono bg-slate-900 border border-cyan-800/50 shadow flex items-center gap-2';
-          streamOverlayTag.innerHTML = `<span class="w-2 h-2 rounded-full bg-cyan-400"></span><span>감지: ${data.tier2_jetson.detected_objects || '없음'}</span>`;
+          streamOverlayTag.replaceChildren();
+          const dotEl = document.createElement('span');
+          dotEl.className = 'w-2 h-2 rounded-full bg-cyan-400';
+          const txtEl = document.createElement('span');
+          txtEl.textContent = `감지: ${data.tier2_jetson.detected_objects || '없음'}`;
+          streamOverlayTag.append(dotEl, txtEl);
         }
 
       } catch (err) {
@@ -642,15 +670,10 @@
       btn.disabled = true;
       label.textContent = '🛑 비상 정지 실행 중...';
       try {
-        await fetch('/api/patrol', {
+        const res = await fetch('/api/estop', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enable: false })
-        }).catch(() => {});
-        const res = await fetch('/api/motor/torque', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enable: false })
+          body: JSON.stringify({})
         });
         const result = await res.json();
         if (result.success) {
@@ -888,161 +911,7 @@
     // 초기 1회 실행 및 인터벌 등록
     fetchHealthData();
     resetAutoFetch();
-
-    function updateNavModeUI(mode) {
-      const badge = document.getElementById('nav-mode-badge');
-      const btnNav2 = document.getElementById('btn-nav2-start');
-      const btnSlam = document.getElementById('btn-slam-start');
-      if (!badge) return;
-
-      if (btnNav2) btnNav2.classList.remove('ring-2', 'ring-emerald-300', 'ring-offset-2', 'ring-offset-slate-900');
-      if (btnSlam) btnSlam.classList.remove('ring-2', 'ring-sky-300', 'ring-offset-2', 'ring-offset-slate-900');
-
-      if (mode === 'NAV2') {
-        badge.className = 'px-3 py-1 rounded-full text-xs font-bold font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 flex items-center gap-1.5';
-        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>Nav2 자율주행 실행 중</span>';
-        if (btnNav2) btnNav2.classList.add('ring-2', 'ring-emerald-300', 'ring-offset-2', 'ring-offset-slate-900');
-      } else if (mode === 'SLAM') {
-        badge.className = 'px-3 py-1 rounded-full text-xs font-bold font-mono bg-sky-500/20 text-sky-300 border border-sky-500/50 flex items-center gap-1.5';
-        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-sky-400 animate-pulse"></span><span>SLAM 지도 작성 실행 중</span>';
-        if (btnSlam) btnSlam.classList.add('ring-2', 'ring-sky-300', 'ring-offset-2', 'ring-offset-slate-900');
-      } else {
-        badge.className = 'px-3 py-1 rounded-full text-xs font-bold font-mono bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1.5';
-        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-400"></span><span>대기 중 (IDLE)</span>';
-      }
-    }
-
-    // 정지 버튼은 비밀번호 없이 즉시 정지 실행
-    async function stopNavModeNow(action) {
-      try {
-        const res = await fetch('/api/nav_mode', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action })
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          updateNavModeUI(action === 'relocalize' ? 'NAV2' : 'IDLE');
-          setTimeout(fetchHealthData, 1500);
-        } else {
-          alert(data.message || '요청 실패');
-        }
-      } catch (e) {
-        alert('서버 통신 오류: ' + e);
-      }
-    }
-
-    function updatePatrolUI(status) {
-      const badge = document.getElementById('patrol-status-badge');
-      const btnStart = document.getElementById('btn-patrol-start');
-      if (!badge) return;
-      const s = String(status || 'IDLE');
-      const active = s.startsWith('NAVIGATING') || s.startsWith('DWELLING') || s.startsWith('RETRY') || s === 'STARTING';
-      if (active) {
-        badge.className = 'col-span-2 sm:col-span-1 px-2.5 py-2 rounded-xl text-[11px] font-mono font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/50 flex items-center justify-center truncate';
-        badge.textContent = '순찰: ' + s;
-        if (btnStart) btnStart.classList.add('ring-2', 'ring-indigo-300', 'ring-offset-2', 'ring-offset-slate-900');
-      } else {
-        badge.className = 'col-span-2 sm:col-span-1 px-2.5 py-2 rounded-xl text-[11px] font-mono font-semibold bg-slate-950 text-slate-400 border border-slate-800 flex items-center justify-center truncate';
-        badge.textContent = '순찰: ' + s;
-        if (btnStart) btnStart.classList.remove('ring-2', 'ring-indigo-300', 'ring-offset-2', 'ring-offset-slate-900');
-      }
-    }
-
-    async function setPatrol(enable) {
-      try {
-        const res = await fetch('/api/patrol', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enable })
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          updatePatrolUI(data.patrol_status || (enable ? 'STARTING' : 'STOPPED'));
-          setTimeout(fetchHealthData, 800);
-        } else {
-          alert(data.message || '순찰 제어 실패');
-        }
-      } catch (e) {
-        alert('서버 통신 오류: ' + e);
-      }
-    }
-
-    // Nav2 / SLAM PIN 인증 모달 제어
-    let pendingNavAction = null;
-
-    function openPinModal(action, label) {
-      pendingNavAction = action;
-      const modal = document.getElementById('pin-modal');
-      const titleEl = document.getElementById('pin-modal-title');
-      const inputEl = document.getElementById('pin-modal-input');
-      const errEl = document.getElementById('pin-modal-error');
-      titleEl.textContent = label + ' — 비밀번호 입력';
-      inputEl.value = '';
-      errEl.textContent = '';
-      errEl.classList.add('hidden');
-      modal.classList.remove('hidden');
-      setTimeout(() => inputEl.focus(), 50);
-    }
-
-    function closePinModal() {
-      pendingNavAction = null;
-      document.getElementById('pin-modal').classList.add('hidden');
-    }
-
-    async function submitPinModal() {
-      if (!pendingNavAction) return;
-      const inputEl = document.getElementById('pin-modal-input');
-      const errEl = document.getElementById('pin-modal-error');
-      const statusEl = document.getElementById('nav-mode-status');
-      const submitBtn = document.getElementById('pin-modal-submit');
-      const password = inputEl.value;
-
-      submitBtn.disabled = true;
-      submitBtn.textContent = '실행 중...';
-      errEl.classList.add('hidden');
-
-      try {
-        const res = await fetch('/api/nav_mode', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: pendingNavAction, password })
-        });
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          errEl.textContent = data.message || '실행 실패';
-          errEl.classList.remove('hidden');
-        } else {
-          if (pendingNavAction === 'nav2_start' || pendingNavAction === 'relocalize') updateNavModeUI('NAV2');
-          else if (pendingNavAction === 'slam_start') updateNavModeUI('SLAM');
-          else updateNavModeUI('IDLE');
-          closePinModal();
-          setTimeout(fetchHealthData, 2000);
-        }
-      } catch (e) {
-        errEl.textContent = '서버 통신 오류: ' + e;
-        errEl.classList.remove('hidden');
-      } finally {
-        submitBtn.disabled = false;
-        submitBtn.textContent = '확인';
-      }
-    }
   </script>
-
-  <!-- PIN 입력 모달 -->
-  <div id="pin-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-    <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-xs w-full p-4 shadow-2xl space-y-3">
-      <h3 id="pin-modal-title" class="text-sm font-bold text-slate-100">비밀번호 입력</h3>
-      <input id="pin-modal-input" type="password" inputmode="numeric" placeholder="비밀번호 입력"
-             onkeydown="if(event.key==='Enter') submitPinModal(); if(event.key==='Escape') closePinModal();"
-             class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-sm text-slate-100 focus:outline-none focus:border-cyan-500" />
-      <p id="pin-modal-error" class="hidden text-xs text-rose-400 font-semibold"></p>
-      <div class="flex justify-end gap-2 pt-1">
-        <button onclick="closePinModal()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300">취소</button>
-        <button id="pin-modal-submit" onclick="submitPinModal()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white">확인</button>
-      </div>
-    </div>
-  </div>
   <script src="/yolo_overlay.js"></script>
   <script>
     if (window.attachYoloOverlay) {

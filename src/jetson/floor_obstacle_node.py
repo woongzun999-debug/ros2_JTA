@@ -31,11 +31,11 @@ class FloorObstacleDetector:
         vfov_deg: float = 48.8,
         roi_top_ratio: float = 0.58,
         roi_bottom_ratio: float = 0.99,
-        chroma_thresh: float = 12.0,
-        luma_thresh: float = 28.0,
+        chroma_thresh: float = 18.0,
+        luma_thresh: float = 38.0,
         edge_low: int = 40,
         edge_high: int = 110,
-        min_area_px: int = 335,
+        min_area_px: int = 650,
         min_box_w: int = 14,
         min_box_h: int = 12,
         max_detect_dist: float = 1.50,
@@ -107,11 +107,12 @@ class FloorObstacleDetector:
         else:
             # 급격한 변화(로봇 코앞을 큰 물체가 가린 경우)에는 기준색 오염 방지
             diff_med = float(np.linalg.norm(med_lab[1:] - self.floor_lab_ema[1:]))
-            if diff_med < 12.0:
+            if diff_med < self.chroma_thresh:
                 self.floor_lab_ema = 0.92 * self.floor_lab_ema + 0.08 * med_lab
 
         # 2. 색차(Chroma) + 명도 편차(Luma) 계산
-        dL = np.abs(lab[:, :, 0] - self.floor_lab_ema[0])
+        dL_signed = self.floor_lab_ema[0] - lab[:, :, 0]
+        dL = np.abs(dL_signed)
         da = lab[:, :, 1] - self.floor_lab_ema[1]
         db = lab[:, :, 2] - self.floor_lab_ema[2]
         dC = np.sqrt(da * da + db * db)
@@ -121,10 +122,10 @@ class FloorObstacleDetector:
         edges = cv2.Canny(gray, self.edge_low, self.edge_high)
         edges_dilated = cv2.dilate(edges, self.kernel_dilate, iterations=1)
 
-        # 색상이 뚜렷하게 다른 물체 OR 명도가 크게 다르면서 경계가 뚜렷한 물체
+        # 색상이 뚜렷하게 다른 물체 OR 명도가 크게 다르면서 경계가 뚜렷한 물체 OR 아주 어두운 물체(밝은 반사광 배제)
         mask_chroma = (dC > self.chroma_thresh).astype(np.uint8) * 255
         mask_luma = ((dL > self.luma_thresh) & (edges_dilated > 0)).astype(np.uint8) * 255
-        mask_strong_dark = (dL > (self.luma_thresh * 1.55)).astype(np.uint8) * 255
+        mask_strong_dark = (dL_signed > (self.luma_thresh * 1.7)).astype(np.uint8) * 255
 
         combined = cv2.bitwise_or(mask_chroma, cv2.bitwise_or(mask_luma, mask_strong_dark))
         # 형태학 열기(1~2px 타일 줄눈·점 잡음 제거) ➔ 닫기(물체 내부 구멍 메우기)
@@ -208,12 +209,13 @@ class FloorObstacleNode(Node):
         self.declare_parameter('hfov_deg', 62.2)
         self.declare_parameter('vfov_deg', 48.8)
         self.declare_parameter('roi_top_ratio', 0.58)
-        self.declare_parameter('chroma_thresh', 12.0)
-        self.declare_parameter('luma_thresh', 28.0)
-        self.declare_parameter('min_area_px', 335)
+        self.declare_parameter('chroma_thresh', 18.0)
+        self.declare_parameter('luma_thresh', 38.0)
+        self.declare_parameter('min_area_px', 650)
         self.declare_parameter('max_detect_dist', 1.50)
-        self.declare_parameter('confirm_frames', 2)
-        self.declare_parameter('beam_hold_sec', 0.8)
+        self.declare_parameter('confirm_frames', 4)
+        self.declare_parameter('beam_hold_sec', 0.0)
+        self.declare_parameter('lateral_padding_m', 0.03)
         self.declare_parameter('frame_id', 'base_footprint')
 
         self.detector = FloorObstacleDetector(
@@ -230,6 +232,7 @@ class FloorObstacleNode(Node):
         )
         self.confirm_frames = max(1, int(self.get_parameter('confirm_frames').value))
         self.beam_hold_sec = max(0.0, float(self.get_parameter('beam_hold_sec').value))
+        self.lateral_padding_m = max(0.0, float(self.get_parameter('lateral_padding_m').value))
         self.frame_id = str(self.get_parameter('frame_id').value)
 
         # LaserScan 스펙 (전방 ±33°, 1° 간격, 67빔)
@@ -303,25 +306,33 @@ class FloorObstacleNode(Node):
                 continue
             angle = math.atan2(y, x)
             idx = int(round((angle - self.angle_min) / self.angle_increment))
-            if 0 <= idx < self.num_beams:
-                if dist < raw_ranges[idx]:
-                    raw_ranges[idx] = dist
+            if self.lateral_padding_m > 0.0:
+                pad_angle = math.atan2(self.lateral_padding_m, max(dist, self.range_min))
+                pad_beams = max(1, int(round(pad_angle / self.angle_increment)))
+            else:
+                pad_beams = 0
+            for b_idx in range(idx - pad_beams, idx + pad_beams + 1):
+                if 0 <= b_idx < self.num_beams and dist < raw_ranges[b_idx]:
+                    raw_ranges[b_idx] = dist
 
-        # 다중 프레임 확정 필터 + 잔상 유지(회피 중 일시 시야 이탈 시 Costmap 조기 삭제 방지)
+        # 다중 프레임 확정 필터 (+ 옵션 잔상 유지: 기본 0.0s, odom vision_obstacle_layer에 유지 위임)
         now = time.monotonic()
         detected_mask = raw_ranges <= self.detector.max_detect_dist
         self.beam_hits = np.where(detected_mask, np.minimum(self.beam_hits + 1, 5), 0)
         newly_confirmed = self.beam_hits >= self.confirm_frames
-        if np.any(newly_confirmed):
-            self.beam_hold_until = np.where(newly_confirmed, now + self.beam_hold_sec, self.beam_hold_until)
-            self.beam_hold_dist = np.where(newly_confirmed, raw_ranges, self.beam_hold_dist)
-
-        active_hold = now <= self.beam_hold_until
-        confirmed_ranges = np.where(
-            newly_confirmed,
-            raw_ranges,
-            np.where(active_hold, self.beam_hold_dist, self.clear_range),
-        )
+        if self.beam_hold_sec > 0.0:
+            if np.any(newly_confirmed):
+                self.beam_hold_until = np.where(newly_confirmed, now + self.beam_hold_sec, self.beam_hold_until)
+                self.beam_hold_dist = np.where(newly_confirmed, raw_ranges, self.beam_hold_dist)
+            active_hold = now <= self.beam_hold_until
+            confirmed_ranges = np.where(
+                newly_confirmed,
+                raw_ranges,
+                np.where(active_hold, self.beam_hold_dist, self.clear_range),
+            )
+        else:
+            active_hold = np.zeros(self.num_beams, dtype=bool)
+            confirmed_ranges = np.where(newly_confirmed, raw_ranges, self.clear_range)
 
         scan = LaserScan()
         scan.header.stamp = stamp

@@ -6,7 +6,7 @@
 - 구독 토픽:
   1) /vlm/response (std_msgs/String): Jetson 4-bit VLM 현장 시각 브리핑 텍스트
   2) /tts/say (std_msgs/String): 관제 웹UI 또는 시스템 경보 음성 텍스트
-- 엔진: Microsoft Edge-TTS (성우급 여성 보이스: ko-KR-SunHiNeural, 속도 +30% 고속)
+- 엔진: Microsoft Edge-TTS (성우급 여성 보이스: ko-KR-SunHiNeural, 속도 +0% 표준)
 - 재생: mpg123
 """
 
@@ -105,7 +105,10 @@ class Pi5SpeakerNode(Node):
         self.speech_lock = threading.Lock()
         self.proc_lock = threading.Lock()
         self.current_audio_proc = None
-        self.audio_device = "plug:dmix:CARD=UACDemoV10,DEV=0"
+        self.audio_seq = 0
+        self.audio_stop_event = threading.Event()
+        self.alsa_card = "UACDemoV10"
+        self.audio_device = f"plug:dmix:CARD={self.alsa_card},DEV=0"
         self.temp_mp3 = "/tmp/pi5_edge_tts.mp3"
         self.voice = "ko-KR-SunHiNeural"  # Microsoft 선희 (전문 성우급 또렷한 여성 음성)
         self.rate = "+0%"                  # 성우 본연의 자연스럽고 편안한 1.0배속 표준 발화
@@ -177,13 +180,15 @@ class Pi5SpeakerNode(Node):
         self.get_logger().info(f"🔊 [Pi5 Speaker Node] Edge-TTS Ready (Voice: {self.voice}, Rate: {self.rate}, Vol: {self.current_volume}%)")
 
     def _get_hardware_volume(self) -> int:
-        try:
-            res = subprocess.run(["amixer", "-c", "0", "sget", "PCM"], capture_output=True, text=True, check=False)
-            m = re.search(r'\[([0-9]+)%\]', res.stdout)
-            if m:
-                return int(m.group(1))
-        except Exception:
-            pass
+        for card in (self.alsa_card, "0"):
+            try:
+                res = subprocess.run(["amixer", "-c", card, "sget", "PCM"], capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    m = re.search(r'\[([0-9]+)%\]', res.stdout)
+                    if m:
+                        return int(m.group(1))
+            except Exception:
+                pass
         return 85
 
     def _broadcast_volume_state(self):
@@ -198,8 +203,9 @@ class Pi5SpeakerNode(Node):
         vol = max(0, min(100, int(vol)))
         self.get_logger().info(f"🔊 [Pi5 Speaker] Setting hardware volume to {vol}%...")
         try:
-            cmd = ["amixer", "-c", "0", "sset", "PCM", f"{vol}%"]
-            subprocess.run(cmd, check=False)
+            res = subprocess.run(["amixer", "-c", self.alsa_card, "sset", "PCM", f"{vol}%"], capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                subprocess.run(["amixer", "-c", "0", "sset", "PCM", f"{vol}%"], capture_output=True, text=True, check=False)
             self.current_volume = vol
             self._broadcast_volume_state()
         except Exception as e:
@@ -236,11 +242,13 @@ class Pi5SpeakerNode(Node):
         return ["mpg123", "-q", "-a", self.audio_device, file_path]
 
     def _speak_tts(self, text: str, context: str = "Pi5 Speaker"):
-        """Edge-TTS로 음성을 생성해 USB 스피커로 동기 재생"""
+        """Edge-TTS로 음성을 생성해 USB 스피커로 동기 재생 (오프라인 부팅 hang 방지용 8초 타임아웃)"""
         try:
-            asyncio.run(self._generate_audio(text))
+            asyncio.run(asyncio.wait_for(self._generate_audio(text), timeout=8.0))
             tts_cmd = ["mpg123", "-q", "-a", self.audio_device, self.temp_mp3]
             subprocess.run(tts_cmd, check=False)
+        except asyncio.TimeoutError:
+            self.get_logger().warn(f"⚠️ [{context}] Edge-TTS timeout (8s) — offline or slow network.")
         except Exception as e:
             self.get_logger().error(f"❌ [{context}] Edge-TTS error: {e}")
 
@@ -297,9 +305,20 @@ class Pi5SpeakerNode(Node):
             self.is_booting = False
             self.get_logger().info("🚀 [Boot Ceremony] System is now fully ACTIVE and ARMED! All sound/speech enabled.")
 
+    def _terminate_proc(self, proc):
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
     def _run_audio_proc(self, cmd: list[str]):
-        """오디오 프로세스를 실행하고 종료 신호(stop)로 즉시 중단할 수 있게 추적"""
+        """오디오 프로세스를 원자적으로 교체·실행하여 중복 재생/고아 프로세스 원천 차단"""
         with self.proc_lock:
+            old_proc = self.current_audio_proc
+            if old_proc is not None:
+                self._terminate_proc(old_proc)
             self.current_audio_proc = subprocess.Popen(cmd)
             proc = self.current_audio_proc
         try:
@@ -312,14 +331,13 @@ class Pi5SpeakerNode(Node):
     def stop_current_audio(self):
         """현재 재생 중인 음악/효과음(부팅 세레머니 포함)을 즉시 종료"""
         with self.proc_lock:
+            self.audio_seq += 1
+            self.audio_stop_event.set()
             proc = self.current_audio_proc
+            self.current_audio_proc = None
         if proc is not None and proc.poll() is None:
             self.get_logger().info("⏹️ [Pi5 Speaker] Stopping active audio playback...")
-            proc.terminate()
-            try:
-                proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            self._terminate_proc(proc)
 
     def sound_callback(self, msg: String):
         sound_req = msg.data.strip()
@@ -338,6 +356,11 @@ class Pi5SpeakerNode(Node):
     def _play_sound_worker(self, sound_req: str):
         # 중복 음악 겹침 방지: 기존 음악만 정리하고 speech_lock 없이 dmix로 스무스하게 재생
         self.stop_current_audio()
+        with self.proc_lock:
+            self.audio_seq += 1
+            my_seq = self.audio_seq
+            self.audio_stop_event.clear()
+
         sound_map = {
             "dobingda": os.path.expanduser("~/music/dobingda.mp3"),
             "bingdari": os.path.expanduser("~/music/dobingda.mp3"),
@@ -350,8 +373,19 @@ class Pi5SpeakerNode(Node):
             self.get_logger().error(f"❌ [Pi5 Sound] File not found: '{file_path}'")
             return
 
-        self.get_logger().info(f"🎵 [Pi5 Sound] Playing sound (dmix): '{file_path}'")
         try:
+            # dobingda 요청 시 dobingda0.mp3 완곡 후 dobingda.mp3 순차 재생 (stop 신호 시 즉시 취소)
+            intro_path = os.path.expanduser("~/music/dobingda0.mp3")
+            if (
+                os.path.normpath(file_path) == os.path.normpath(os.path.expanduser("~/music/dobingda.mp3"))
+                and os.path.exists(intro_path)
+            ):
+                self.get_logger().info(f"🎵 [Pi5 Sound] Playing intro sound (dmix): '{intro_path}'")
+                self._run_audio_proc(self._build_audio_cmd(intro_path))
+                if self.audio_seq != my_seq or self.audio_stop_event.is_set():
+                    return
+
+            self.get_logger().info(f"🎵 [Pi5 Sound] Playing sound (dmix): '{file_path}'")
             cmd = self._build_audio_cmd(file_path)
             self._run_audio_proc(cmd)
         except Exception as e:
@@ -391,8 +425,10 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.stop_current_audio()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

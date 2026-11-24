@@ -51,14 +51,10 @@ bt_navigator:
   ros__parameters:
     use_sim_time: False
     global_frame: map
-    robot_base_frame: base_link
+    robot_base_frame: base_footprint
     odom_topic: /odom
-    default_bt_xml_filename: "navigate_w_replanning_and_recovery.xml"
     bt_loop_duration: 10
     default_server_timeout: 20
-    enable_groot_monitoring: True
-    groot_zmq_publisher_port: 1666
-    groot_zmq_server_port: 1667
     plugin_lib_names:
     - nav2_compute_path_to_pose_action_bt_node
     - nav2_compute_path_through_poses_action_bt_node
@@ -166,7 +162,7 @@ controller_server:
       CostCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 1.5
+        cost_weight: 4.0
         critical_cost: 300.0
         consider_footprint: false
         collision_cost: 1000000.0
@@ -174,7 +170,7 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 14.0
+        cost_weight: 9.0
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 3
         threshold_to_consider: 0.5
@@ -246,14 +242,14 @@ local_costmap:
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
-      robot_base_frame: base_link
+      robot_base_frame: base_footprint
       use_sim_time: False
       rolling_window: true
       width: 3
       height: 3
       resolution: 0.025
       robot_radius: 0.145
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "vision_obstacle_layer", "inflation_layer"]
       filters: ["keepout_filter"]
       keepout_filter:
         plugin: "nav2_costmap_2d::KeepoutFilter"
@@ -264,12 +260,12 @@ local_costmap:
         transform_tolerance: 0.2
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.19
-        cost_scaling_factor: 15.0
+        inflation_radius: 0.25
+        cost_scaling_factor: 7.0
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        observation_sources: scan vision_scan
+        observation_sources: scan
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -280,6 +276,11 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
+      vision_obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        combination_method: 1
+        observation_sources: vision_scan
         vision_scan:
           topic: /vision/scan
           max_obstacle_height: 2.0
@@ -306,7 +307,7 @@ global_costmap:
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
-      robot_base_frame: base_link
+      robot_base_frame: base_footprint
       use_sim_time: False
       robot_radius: 0.145
       resolution: 0.05
@@ -396,7 +397,7 @@ behavior_server:
     wait:
       plugin: "nav2_behaviors/Wait"
     global_frame: odom
-    robot_base_frame: base_link
+    robot_base_frame: base_footprint
     transform_timeout: 0.1
     use_sim_time: False
     simulate_ahead_time: 0.5
@@ -410,7 +411,7 @@ robot_state_publisher:
 
 waypoint_follower:
   ros__parameters:
-    loop_rate: 200
+    loop_rate: 20
     stop_on_failure: false
     waypoint_task_executor_plugin: "wait_at_waypoint"
     wait_at_waypoint:

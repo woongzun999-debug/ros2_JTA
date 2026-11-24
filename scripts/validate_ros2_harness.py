@@ -143,10 +143,49 @@ class HarnessValidator:
             self.fail("obstacle_avoidance.py: EMERGENCY_STOP_DIST 안전 상수가 누락되었습니다!")
 
         stop_sh = self.root / "src" / "pi5" / "utils" / "stop.sh"
-        if stop_sh.exists() and "/cmd_vel" in stop_sh.read_text(encoding="utf-8"):
-            self.ok("src/pi5/utils/stop.sh: 강제 정지 스크립트 정상 확인")
+        if stop_sh.exists():
+            stop_txt = stop_sh.read_text(encoding="utf-8")
+            missing_stop = [
+                tok for tok in ("/cmd_vel", "ROS_DOMAIN_ID=30", "rmw_cyclonedds_cpp", "CYCLONEDDS_URI", "/motor_power")
+                if tok not in stop_txt
+            ]
+            if not missing_stop:
+                self.ok("src/pi5/utils/stop.sh: CycloneDDS Domain 30 + /cmd_vel + /motor_power 비상 정지 확인")
+            else:
+                self.fail(f"src/pi5/utils/stop.sh: 필수 안전 설정 누락 ({', '.join(missing_stop)})")
         else:
-            self.fail("src/pi5/utils/stop.sh: 비상 정지 스크립트가 없거나 /cmd_vel 발행 로직이 없습니다.")
+            self.fail("src/pi5/utils/stop.sh: 비상 정지 스크립트가 없습니다.")
+
+        # patrol_node.py & auto_localizer.py 안전 정지 및 전방 라이다 대칭 감지 검증
+        for label, rel_p in (
+            ("patrol_node.py", Path("src/pi5/jta_bringup/jta_bringup/patrol_node.py")),
+            ("auto_localizer.py", Path("src/pi5/jta_bringup/jta_bringup/auto_localizer.py")),
+        ):
+            pfile = self.root / rel_p
+            if not pfile.exists():
+                self.fail(f"{rel_p} 파일이 없습니다.")
+                continue
+            psrc = pfile.read_text(encoding="utf-8")
+            ptree = ast.parse(psrc)
+            pfuncs = {n.name for n in ast.walk(ptree) if isinstance(n, ast.FunctionDef)}
+            if "stop_robot" in pfuncs:
+                self.ok(f"{label}: 모터 안전 정지 메서드(stop_robot) 존재 확인")
+            else:
+                self.fail(f"{label}: stop_robot() 안전 정지 메서드가 누락되었습니다!")
+            if label == "patrol_node.py":
+                if "math.atan2(math.sin(" in psrc:
+                    self.ok("patrol_node.py: LDS-01 정면 ±25° 각도 정규화(좌우 대칭 감지) 확인")
+                else:
+                    self.fail("patrol_node.py: _scan_cb 정면 각도 정규화 누락 (우측 사각지대 위험)!")
+
+        # WebUI 원자적 /api/estop 엔드포인트 검증
+        web_file = self.root / "src" / "laptop" / "web" / "web_monitor_server.py"
+        if web_file.exists():
+            wsrc = web_file.read_text(encoding="utf-8")
+            if "'/api/estop'" in wsrc and "def emergency_stop" in wsrc:
+                self.ok("web_monitor_server.py: 원자적 비상 정지 엔드포인트(/api/estop) 확인")
+            else:
+                self.fail("web_monitor_server.py: 원자적 /api/estop 엔드포인트가 누락되었습니다!")
 
     def check_jetson_yolo_guardrails(self):
         print(f"\n{BOLD}{CYAN}5. Tier 2 Jetson YOLO 실시간 추론 가드레일 검증{RESET}")

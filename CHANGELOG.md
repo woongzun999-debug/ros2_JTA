@@ -17,6 +17,47 @@
 
 ---
 
+## [v1.4.12] - 2026-11-24
+
+### 🎯 핵심 릴리즈 요약
+3-Tier 전수 점검에서 식별된 **실주행 안전·비상정지 치명 오류(5종)**와 **로직·성능·현장 운용 고도화(10종)**, 그리고 **바닥 장애물 감도 완화(`confirm=4f`, `raytrace_min_range: 0.0`) 및 사람 감지 카운트다운 HUD·추적 종료 음원 자동 중단·`dobingda` 순차 재생**까지 Pi 5·Jetson 실기 배포 및 검증을 완료했습니다.
+
+### 🚀 세부 변경 내역
+- **실주행 안전·비상정지 핫픽스 (`stop.sh`, `patrol_node.py`, `auto_localizer.py`, `run_robot_autostart.sh`, `web_monitor_server.py`, `validate_ros2_harness.py`)**:
+  - `src/pi5/utils/stop.sh`: `ROS_DOMAIN_ID=30`, `rmw_cyclonedds_cpp`, `CYCLONEDDS_URI` 명시 + DDS 매칭 대기 + `/motor_power false` + 순찰·Nav2 Goal 취소 + `/cmd_vel=0` 2단계 정지(호스트/컨테이너 겸용).
+  - `patrol_node.py` & `auto_localizer.py`: `_scan_cb()` `atan2(sin, cos)` 정규화로 LDS-01 전방 우측(`335~359°`) 사각지대 해소, `goal_seq`/`kind`로 `DOCK_RETURN`/`GOTO_WP` 전환 시 `single_goal_active` 덮어쓰기 및 Goal 응답 대기 Race 차단, 저전압 복귀 중 사람 추종 탈선 차단, `SignalHandlerOptions.NO` 기반 `SIGTERM` 안전 정지, 추적 종료 시 `/play/sound` `"stop"` 자동 발행.
+  - `web_monitor_server.py` · `index.html` · `map.html`: 원자적 `POST /api/estop` 신설(회전·순찰·추종·Nav2 취소 + `/cmd_vel=0` + 토크 차단), `cancel_all_navigation()`/`send_waypoint_goal()`의 모든 `patrol_node` 활성 상태 중단, `nav2_start`/`slam_start` 전 `/cmd_vel=0` 선행 발행.
+  - `run_robot_autostart.sh`: 중복 실행 검사(`pgrep`)를 부팅 플래그 삭제·`fuser -k` 이전 최상단으로 이동.
+  - `validate_ros2_harness.py`: `stop.sh` CycloneDDS·`/motor_power`, `patrol_node` 우측 라이다 정규화·`stop_robot`, `auto_localizer` `stop_robot`, WebUI `/api/estop` 검증 추가(`PASS 78 / 0 FAIL`).
+- **Jetson VLM·YOLO·제스처·페일오버 고도화 (`vlm_service_node.py`, `detector_node.py`, `floor_obstacle_node.py`, `gesture_node.py`, `network_failover.py`)**:
+  - `vlm_service_node.py`: 백그라운드 25초 공회전 추론 기본 OFF(4-bit VRAM 상주 순수 On-Demand), `camera_callback` 매초 15회 `imdecode` 제거(추론 직전 락 밖 1회 디코딩), non-blocking 락으로 연타 스레드 누적 차단, 사람 근접 사운드 `conf >= 0.50`·`time.monotonic()` 통일.
+  - `detector_node.py`: 실기 런치 표준(`yolo11s.pt`, `640`, `0.60`)과 기본값 통일 및 2초 주기 `/jetson/system_state`(`/proc/meminfo` RAM·Swap·온도 실측) 발행 신설.
+  - `floor_obstacle_node.py` & `nav2_params.yaml`: 바닥 과민 오탐 완화(`chroma_thresh=18.0`, `luma_thresh=38.0`, `min_area_px=650`, `confirm_frames=4`, 밝은 반사광 배제 `dL_signed`) + `vision_scan.raytrace_min_range: 0.0`, `waypoint_follower.loop_rate: 200 ➔ 20`, `robot_base_frame: base_footprint` 통일, Galactic 레거시 키 제거.
+  - `gesture_node.py` 손가락 접힘 히스테리시스(`<= 1.05`) 교정, `network_failover.py` 백업 전환 시 유선 NIC `.13` 삭제 + `time.monotonic()` 적용.
+- **Pi 5 오디오·전원·카메라 & WebUI 오프라인·경량화·실측 텔레메트리 (`speaker_node.py`, `pi5_power_node.py`, `camera_node.py`, `web_monitor_server.py`, `yolo_overlay.js`, `static/tailwind.js`, `sync_to_robot.sh`)**:
+  - `speaker_node.py`: `amixer -c UACDemoV10`(폴백 `-c 0`), 오디오 프로세스 원자적 교체, Edge-TTS `8s` 타임아웃, `finally` 종료 정리, `dobingda0.mp3` 완곡 후 `dobingda.mp3` 순차 재생(`"stop"` 시 즉시 취소).
+  - `pi5_power_node.py` (`/pi5/system_state` 실측 `throttled` 비트마스크 해석 발행) & `camera_node.py` (`time.monotonic()`, `spin_once(0.0)`, 동적 IMX219 엔티티명).
+  - WebUI: 외부 Tailwind CDN 제거 ➔ 로컬 `/tailwind.js`(398KB) 100% 오프라인 구동, `/video_feed` `threading.Condition` 이벤트 송출, YAML/JSON `mtime` 캐싱, `tf2` 폴백으로 SLAM 중 2D 맵 위치·라이다 표시, `/api/yolo` 사람 감지 카운트다운 HUD(`3s/30s/50s`), `IS_WEB_MASTER` 이중 WebUI 충돌 차단, 실측 Pi 5 쓰로틀링 & Jetson RAM/Swap 연동, Keepout 선 두께 `0.15m` 통일, `turn_seq` 회전 레이스 차단.
+  - `scripts/sync_to_robot.sh`: Pi 5·Jetson(`docker exec` `install/` 반영 포함) 전체 운영 파일 동기화 보강 및 `docs/1_master/process_specification.md` 문서 정비.
+
+---
+
+## [v1.4.11] - 2026-11-24
+
+### 🎯 핵심 릴리즈 요약
+바닥 장애물 회피 시 **"살짝 틀었다가 다시 밀고 나가는" 현상**을 해결하기 위해 **`local_costmap` 비전 전용 레이어(`vision_obstacle_layer`) 분리**, **카메라 38cm 사각지대 보호(`raytrace_min_range: 0.40`)**, **MPPI 회피/인플레이션 밸런스 재조정**, 그리고 **`floor_obstacle_node.py` 회전 잔상 제거(`beam_hold_sec: 0.0`) + 좌우 `±3cm` 빔 패딩(`lateral_padding_m: 0.03`)**을 적용했습니다 *(로컬 검증 완료, Pi 5·Jetson 실기 배포는 전원 투입 후 `sync_to_robot.sh all` 대기)*.
+
+### 🚀 세부 변경 내역
+- **Nav2 `local_costmap` 비전 레이어 분리 & MPPI 회피 보강 (`src/pi5/jta_bringup/config/nav2_params.yaml`)**:
+  - `local_costmap.plugins`에 `vision_obstacle_layer`(`nav2_costmap_2d::ObstacleLayer`, `combination_method: 1`)를 신설해 `/scan`(2D LiDAR)의 `clearing: True` raytrace가 바닥 장애물을 실시간 삭제하던 구조적 충돌을 차단.
+  - `vision_scan.raytrace_min_range: 0.0 ➔ 0.40` 적용으로 카메라 하단 사각지대(전방 `~38cm`) 진입 시 코앞 장애물 셀이 지워지지 않고 `odom` Costmap에 유지되도록 보호.
+  - MPPI `CostCritic.cost_weight: 1.5 ➔ 4.0`, `PathAlignCritic.cost_weight: 14.0 ➔ 9.0`, `local_costmap` `inflation_radius: 0.19 ➔ 0.25`, `cost_scaling_factor: 15.0 ➔ 7.0`으로 조정해 장애물 우회 여유 및 주행 안정감 강화.
+- **바닥 장애물 가상 라이다 잔상 제거 & 폭 패딩 (`src/jetson/floor_obstacle_node.py`)**:
+  - `beam_hold_sec: 0.8 ➔ 0.0`: 로봇 회전 시 `base_footprint` 기준 잔상이 함께 회전·번지던 현상을 제거하고 시야 이탈 장애물 유지를 `odom` 기반 `vision_obstacle_layer`에 위임.
+  - `lateral_padding_m: 0.03` 파라미터 신설: `_build_scan_msg()`에서 거리 비례 각도(`atan2(0.03, dist)`)만큼 좌우 빔을 확장해 물체 모서리 긁힘 방지.
+
+---
+
 ## [v1.4.10] - 2026-11-24
 
 ### 🎯 핵심 릴리즈 요약

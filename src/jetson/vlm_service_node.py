@@ -137,7 +137,7 @@ class JetsonVLMResidentNode(Node):
         self.get_logger().info(">>> [VLM Service] Initializing Qwen2-VL Continuous Engine...")
 
         # 상태 및 동기화 락
-        self.latest_frame = None
+        self.latest_jpeg_bytes = None
         self.frame_lock = threading.Lock()
         
         self.latest_yolo_data = None
@@ -147,7 +147,9 @@ class JetsonVLMResidentNode(Node):
         self.inference_lock = threading.Lock()
         self.is_inferencing = False
         self.is_running = True
-        self.background_cooldown_sec = 25.0  # 발열·YOLO 간섭 최소화용 백그라운드 쿨다운
+        self.declare_parameter('background_loop_enabled', False)
+        self.enable_background_loop = bool(self.get_parameter('background_loop_enabled').value)
+        self.background_cooldown_sec = 25.0  # 백그라운드 루프 활성화 시 쿨다운 (기본 OFF: 순수 On-Demand)
 
         # 캐시 및 발화 상태 관리
         self.latest_summary = "로봇 주변 시야를 확인 중입니다."
@@ -240,22 +242,18 @@ class JetsonVLMResidentNode(Node):
         self.pending_sound_at = None
         self.sound_timer = self.create_timer(0.1, self._sound_timer_cb)
 
-        # 7. 독립 TTS 발화 구독 (/tts/say)
-        self.tts_sub = self.create_subscription(
-            String,
-            '/tts/say',
-            self.tts_callback,
-            10
-        )
-
         # GPU VRAM 모델 1회 상주 로드
         self.load_model()
         self.get_logger().info(">>> [VLM Service] Model Resident in GPU VRAM! Ready for queries.")
 
-        # 7. 상시 연속 가동 백그라운드 워커 스레드 시작
-        self.worker_thread = threading.Thread(target=self._continuous_loop, daemon=True)
-        self.worker_thread.start()
-        self.get_logger().info(f">>> [VLM Service] Continuous Loop Worker Started (Periodic: {self.periodic_interval_sec}s)")
+        # 7. 백그라운드 연속 추론 루프 (기본 OFF: GPU 발열·YOLO 간섭·락 대기 원천 차단, 순수 On-Demand 운영)
+        if self.enable_background_loop:
+            self.worker_thread = threading.Thread(target=self._continuous_loop, daemon=True)
+            self.worker_thread.start()
+            self.get_logger().info(f">>> [VLM Service] Continuous Loop Worker Started (Cooldown: {self.background_cooldown_sec}s)")
+        else:
+            self.worker_thread = None
+            self.get_logger().info(">>> [VLM Service] Pure On-Demand Mode (4-bit VRAM resident, background loop OFF)")
 
     def load_model(self):
         self.get_logger().info(">>> [VLM Service] Loading Qwen2-VL-2B-Instruct into GPU VRAM (4-bit NF4)...")
@@ -282,13 +280,11 @@ class JetsonVLMResidentNode(Node):
         self.get_logger().info(f">>> [VLM Service] 4-bit Model loaded successfully in {load_sec:.2f}s! (VRAM: {allocated:.2f}GB)")
 
     def camera_callback(self, msg: CompressedImage):
-        try:
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        # 매초 15회 불필요한 cv2.imdecode 제거: 원본 JPEG 바이트만 O(1) 보관 후 추론 직전 1회 디코딩
+        if msg.data:
+            raw = bytes(msg.data)
             with self.frame_lock:
-                self.latest_frame = frame
-        except Exception as e:
-            self.get_logger().error(f"Frame decode error: {e}")
+                self.latest_jpeg_bytes = raw
 
     def scan_callback(self, msg: LaserScan):
         """LDS-01 라이다 전방 60도 부채꼴 콘(±30도) 최소 실측 거리 산출"""
@@ -318,10 +314,11 @@ class JetsonVLMResidentNode(Node):
                 self.latest_yolo_data = data
                 self.latest_yolo_counts = dict(counts)
 
-            # ⚡ [방안 A: 사람 바운딩 박스 세로 높이(Height >= 200px) 기반 1.5m 근접 진입 판정]
-            # ⚡ [방안 A: 사람 바운딩 박스 세로 높이(Height >= 280px) 기반 1.0m 초근접 진입 판정]
-            # 체격/각도 편차 보정: 640x480 화면의 약 60%를 채우는 280px 이상일 때만 확실한 1.0m 근접으로 판정
-            person_objs = [obj for obj in objects if obj.get("class_name") == "person"]
+            # 사람 바운딩 박스 세로 높이(h >= 250px, conf >= 0.50) 기반 1.2m 근접 3초 확정 판정 (patrol_node와 기준 일치)
+            person_objs = [
+                obj for obj in objects
+                if obj.get("class_name") == "person" and float(obj.get("conf", 1.0)) >= 0.50
+            ]
 
             is_person_close = False
             max_person_h = 0.0
@@ -335,11 +332,11 @@ class JetsonVLMResidentNode(Node):
                         is_person_close = True
                         break
 
-            now = time.time()
+            now = time.monotonic()
             if (
                 is_person_close
                 and self.pending_sound_at is None
-                and (now - self.last_sound_time >= self.sound_cooldown_sec)
+                and (self.last_sound_time == 0.0 or (now - self.last_sound_time >= self.sound_cooldown_sec))
             ):
                 if self.close_person_since is None or (now - self.close_person_last_seen) > 0.8:
                     self.close_person_since = now
@@ -349,7 +346,7 @@ class JetsonVLMResidentNode(Node):
                     self.last_sound_time = now
                     self.pending_sound_at = now + self.sound_delay_sec
                     self.get_logger().info(
-                        f"⏳ [Vision 1.2m Proximity] Confirmed >= {self.sound_confirm_sec:.0f}s (Height: {max_person_h:.1f}px) -> Playing dobingda.mp3 in {self.sound_delay_sec:.0f}s (cooldown {self.sound_cooldown_sec:.0f}s)"
+                        f"⏳ [Vision 1.2m Proximity] Confirmed >= {self.sound_confirm_sec:.0f}s (Height: {max_person_h:.1f}px) -> Playing dobingda.mp3 (cooldown {self.sound_cooldown_sec:.0f}s)"
                     )
             elif not is_person_close and self.close_person_since is not None and (now - self.close_person_last_seen) > 0.8:
                 self.close_person_since = None
@@ -359,18 +356,15 @@ class JetsonVLMResidentNode(Node):
     def _sound_timer_cb(self):
         if self.pending_sound_at is None:
             return
-        now = time.time()
+        now = time.monotonic()
         if now >= self.pending_sound_at:
             self.pending_sound_at = None
             sound_msg = String()
             sound_msg.data = os.environ.get("PI5_SOUND_DOBINGDA", "dobingda")
             self.sound_pub.publish(sound_msg)
             self.get_logger().info(
-                "⚡ [Vision 2.0m Proximity (+3s)] Playing dobingda.mp3!"
+                "⚡ [Vision 1.2m Proximity] Playing dobingda.mp3!"
             )
-
-    def tts_callback(self, msg: String):
-        pass  # Pi 5 speaker_node가 직접 /tts/say 토픽을 수신하여 하드웨어 스피커로 출력함
 
     def _build_situation_prompt(self, allow_person_alert: bool = True) -> tuple[str, bool]:
         """상황 브리핑 프롬프트 생성 (수동 요청 시 YOLO 개입 없이 순수 VLM, 백그라운드만 1.5m 사람 경보)"""
@@ -432,15 +426,27 @@ class JetsonVLMResidentNode(Node):
         ).start()
 
     def _run_chat_query(self, custom_prompt: str):
-        with self.inference_lock:
+        # 추론 중 연타로 스레드 무한 누적 방지 (non-blocking 락 체크)
+        if not self.inference_lock.acquire(blocking=False):
+            self.get_logger().warn(">>> [CLI Chat Query] VLM busy -> dropping duplicate request.")
+            out_msg = String()
+            out_msg.data = "(이전 VLM 분석을 처리 중입니다. 잠시 후 다시 질문해 주세요.)"
+            self.chat_pub.publish(out_msg)
+            return
+        try:
             self.get_logger().info(f">>> [CLI Chat Query] Prompt: '{custom_prompt}'")
             resp = self._execute_vlm_inference(custom_prompt, max_new_tokens=96)
             out_msg = String()
             out_msg.data = resp if resp else "(현재 카메라 프레임이 없거나 추론에 실패했습니다.)"
             self.chat_pub.publish(out_msg)
+        finally:
+            self.inference_lock.release()
 
     def _run_on_demand_query(self, custom_prompt: str, is_briefing: bool = False):
-        with self.inference_lock:
+        if not self.inference_lock.acquire(blocking=False):
+            self.get_logger().warn(">>> [On-Demand Query] VLM busy -> dropping duplicate request.")
+            return
+        try:
             self.get_logger().info(f">>> [On-Demand Query] Prompt: '{custom_prompt}'")
             resp = self._execute_vlm_inference(custom_prompt)
             if resp:
@@ -456,15 +462,17 @@ class JetsonVLMResidentNode(Node):
                 resp_msg = String()
                 resp_msg.data = resp
                 self.response_pub.publish(resp_msg)
+        finally:
+            self.inference_lock.release()
 
     def _continuous_loop(self):
-        """[상시 연속 추론 엔진] 6~7초 주기로 무한 반복하며 상태 변화(1) 및 120초 인터벌(3) 자동 감시"""
+        """[옵션 백그라운드 추론 엔진] background_loop_enabled=True 시에만 동작"""
         self.get_logger().info(">>> [Continuous Engine] Continuous perception loop running...")
         time.sleep(3.0)  # 초기 센서 버퍼 안정화 대기
 
         while self.is_running and rclpy.ok():
             with self.frame_lock:
-                frame_available = self.latest_frame is not None
+                frame_available = self.latest_jpeg_bytes is not None
 
             if not frame_available:
                 time.sleep(1.0)
@@ -497,11 +505,18 @@ class JetsonVLMResidentNode(Node):
         """Qwen2-VL 실제 추론 및 좌표/노이즈 방탄 필터링 공통 함수"""
         try:
             with self.frame_lock:
-                if self.latest_frame is None:
-                    return ""
-                resized = cv2.resize(self.latest_frame, (640, 480), interpolation=cv2.INTER_AREA)
-                rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(rgb_frame)
+                raw_jpeg = self.latest_jpeg_bytes
+            if not raw_jpeg:
+                return ""
+
+            # 락 밖에서 1회만 JPEG 디코딩·리사이즈·RGB 변환 (camera_callback 블로킹 0%)
+            frame = cv2.imdecode(np.frombuffer(raw_jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                return ""
+            if frame.shape[1] != 640 or frame.shape[0] != 480:
+                frame = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb_frame)
 
             t_start = time.time()
             messages = [
@@ -564,7 +579,8 @@ def main(args=None):
     finally:
         node.is_running = False
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

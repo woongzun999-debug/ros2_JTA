@@ -6,7 +6,7 @@
 ### 📋 문서 버전 관리 (Document Version Control)
 | 문서&nbsp;버전 | 개정&nbsp;일자 | 작성자 | 문서&nbsp;상태 | 변경 및 개정 내역 |
 | :---: | :---: | :---: | :---: | :--- |
-| `v1.0.0` | 26.11.05 | ROS2_JW | Approved | • `docs/` 4대 티어(1_master, 2_tiers, 3_daily_review, 4_career) 중앙 포털 최초 신설 |
+| `v1.0.0` | 26.11.05 | ROS2_JW | Approved | • `docs/` 중앙 문서 포털 최초 신설 |
 | `v1.4.1` | 26.11.16 | ROS2_JW | Approved | • CycloneDDS Unicast Peer, Lichtblick 관제, WebUI Nav2/SLAM 통합 일지 및 점검일 전수 동기화 |
 | `v1.4.2` | 26.11.17 | ROS2_JW | Approved | • `patrol_node` 다중 웨이포인트 순찰, WebUI `/map` 3열 가두리·전압바, `foxglove-bridge.service` 자동 기동 및 AMCL 복구 반영 |
 | `v1.4.3` | 26.11.17 | ROS2_JW | Approved | • `vlm_service_node.py` Option A(이벤트 우선 + 경량 추론) 튜닝 및 전체 문서 체계 전수 정합성 동기화 |
@@ -16,7 +16,9 @@
 | `v1.4.7` | 26.11.19 | ROS2_JW | Approved | • Nav2 `behavior_server` 정정·좁은공간 탈출 튜닝, AMCL 맵 정리·확장<br>• 최단거리/선택 WP/3초확정 음성·20초 추종(40초 쿨다운, IDLE 포함), WebUI `LOCALIZING`·배지 교정<br>• 전 문서 `Approved`/`26-xx-xx` 표준화 |
 | `v1.4.8` | 26.11.20 | ROS2_JW | Approved | • WebUI 원본 JPEG 패스스루 + `<canvas>` YOLO 오버레이, `IS_PI5_LOCAL` Pi 5(`:9999`) 이전<br>• 지정순찰(`custom_order`)·부팅 볼륨(`80%→95%`)·`1.7m` 통일 반영 |
 | `v1.4.9` | 26.11.23 | ROS2_JW | Approved | • 상시 바닥장애물(`/vision/scan`), ArUco 카드(`0~10`)+한손(✋/👍) Nav2·자동순찰 제어, `10.5V` 저전압 `dock` 복귀<br>• `OpenCR OFF` UI 교정 및 `1.2m/30s/50s` 통일 |
-| **`v1.4.10`** | 26.11.24 | **ROS2_JW** | **Approved** | • Pi 5·Jetson 실기 스크립트/설정/마스크 1:1 백업 & `launch_yolo11n.sh` 배포 동기화<br>• `speaker_node.py` 랜덤 부팅곡(`~/music/song`)+인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 |
+| `v1.4.10` | 26.11.24 | ROS2_JW | Approved | • Pi 5·Jetson 실기 스크립트/설정/마스크 1:1 백업 & `launch_yolo11n.sh` 배포 동기화<br>• `speaker_node.py` 랜덤 부팅곡(`~/music/song`)+인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 |
+| `v1.4.11` | 26.11.24 | ROS2_JW | Approved | • Nav2 `local_costmap` `vision_obstacle_layer` 분리, `MPPI` `CostCritic: 4.0`/`PathAlign: 9.0`, `floor_obstacle_node` `beam_hold_sec=0.0`·`lateral_padding_m=0.03` 및 `process_specification.md` 신설 |
+| **`v1.4.12`** | 26.11.24 | **ROS2_JW** | **Approved** | • 3-Tier 안전 핫픽스(`stop.sh` CycloneDDS·`patrol_node` 우측 라이다/`goal_seq`/저전압·WebUI `/api/estop`·`run_robot_autostart.sh`)<br>• VLM Pure On-Demand·오프라인 `/tailwind.js`·실측 텔레메트리(`/pi5/system_state`·`/jetson/system_state`)·바닥감도(`confirm=4f`, `raytrace 0.0`)·사람 카운트다운 HUD·`dobingda0.mp3 ➔ dobingda.mp3` 순차재생 및 하네스 `78 PASS` 동기화 |
 
 ---
 
@@ -34,7 +36,8 @@ flowchart LR
     
     Hub ==> M["🌟 1_master (통합 뷰)"]:::m1
     M --> M1["master_specification.md (종합 명세)"]:::m1
-    M --> M2["architecture_roadmap_v2.md (차기 로드맵)"]:::m1
+    M --> M2["process_specification.md (실행 프로세스 명세)"]:::m1
+    M --> M3["architecture_roadmap_v2.md (차기 로드맵)"]:::m1
     
     Hub ==> T["🤖 2_tiers (기기별 상세)"]:::t2
     T --> T1["tier1_raspberry_pi5 (센서/모터/전원)"]:::t2
@@ -53,6 +56,8 @@ flowchart LR
 
 * **[master_specification.md](1_master/master_specification.md)**  
   3-Tier 시스템(Pi 5 + Jetson + Laptop)의 통신 토폴로지, 토픽 계약, 하드웨어 스펙, 시리얼 포트 및 트러블슈팅을 총망라한 **단일 진실 공급원(Single Source of Truth) 통합 명세서**. (작성자: `ROS2_JW`, 인쇄/PDF 지원)
+* **[process_specification.md](1_master/process_specification.md)**  
+  부팅 시퀀스, Host OS·컨테이너·ROS 2 경계별 전체 실행 프로세스 카탈로그, 5대 데이터 파이프라인, 토픽/QoS 계약, `patrol_node` 상태 머신 및 학습 점검 체크포인트를 정리한 **실행 프로세스 명세서**. (작성자: `ROS2_JW`)
 * **[architecture_roadmap_v2.md](1_master/architecture_roadmap_v2.md)**  
   Pi 5 전원 완전 분리, Pi 5 로컬 폐쇄 루프(Nav2 + SLAM), 경사로 단차 낙상 방지(Keep-out Zone), 20평 컴퓨터실 3cm 의자 다리 회피 등 **순수 차기 고도화 계획 및 연구 과제**. (작성자: `ROS2_JW`)
 
@@ -65,16 +70,16 @@ flowchart LR
 ### 🍓 Tier 1: 센서 & 구동계 ([`docs/2_tiers/tier1_raspberry_pi5/`](2_tiers/tier1_raspberry_pi5/))
 * **[hardware_and_power.md](2_tiers/tier1_raspberry_pi5/hardware_and_power.md)**: Pi 5 스펙, CSI 카메라 저지연 파이프라인(640x480 Q90 15 FPS), 5.2V 5A 전원 구성 및 `10.5V` 저전압 `dock` 복귀.
 * **[opencr_and_motor.md](2_tiers/tier1_raspberry_pi5/opencr_and_motor.md)**: OpenCR 1.0 펌웨어, 모터 PID 제어, 1Mbps 시리얼 CDC ACM 통신, `10.5V` 복귀 & `OpenCR OFF` 단절 감시.
-* **[jta_bringup_package.md](2_tiers/tier1_raspberry_pi5/jta_bringup_package.md)**: `jta_bringup` 통합 패키지, `MPPI` + `vision_scan` 바닥 회피, `patrol_node`(지정순찰·`1.2m/30s/50s` 추종·ArUco·`10.5V` `dock`) 및 무인 부팅(`Linger`).
+* **[jta_bringup_package.md](2_tiers/tier1_raspberry_pi5/jta_bringup_package.md)**: `jta_bringup` 통합 패키지, `MPPI` + `vision_obstacle_layer`(`raytrace 0.0~1.8m`), `patrol_node`(`atan2`/`goal_seq`/지정순찰·`1.2m/30s/50s` 추종·ArUco·`10.5V` `dock`), `pi5_power_node`(`/pi5/system_state`), `stop.sh`(CycloneDDS) 및 무인 부팅(`Linger`).
 
 ### ⚡ Tier 2: 엣지 AI 브레인 ([`docs/2_tiers/tier2_jetson_orin_nano/`](2_tiers/tier2_jetson_orin_nano/))
 * **[hardware_and_docker.md](2_tiers/tier2_jetson_orin_nano/hardware_and_docker.md)**: Jetson Orin Nano 스펙, TUI 모드, 16GB NVMe Swap, `mediapipe==0.10.18` 격리 설치 및 Docker 환경.
-* **[yolo11n_package.md](2_tiers/tier2_jetson_orin_nano/yolo11n_package.md)**: `yolo11n` ROS 2 패키지, 0.1ms JSON 경량 발행 및 `launch_yolo11n.sh` 통합 자동 기동.
-* **[vlm_tts_service.md](2_tiers/tier2_jetson_orin_nano/vlm_tts_service.md)**: Qwen2-VL 4-bit 상주(`640×480`·`40 tokens`), `1.2m` 근접 트리거, 상시 바닥장애물(`floor_obstacle_node`) & ArUco/한손 제어(`gesture_node`).
+* **[yolo11n_package.md](2_tiers/tier2_jetson_orin_nano/yolo11n_package.md)**: `yolo11n` ROS 2 패키지(`yolo11s.pt/640/0.60` 실기 표준, 0.1ms JSON, `/jetson/system_state`), `launch_yolo11n.sh` 통합 자동 기동 및 `network-failover.service`.
+* **[vlm_tts_service.md](2_tiers/tier2_jetson_orin_nano/vlm_tts_service.md)**: Qwen2-VL 4-bit Pure On-Demand(`VRAM 1.42GB`, Lazy JPEG, `640×480`·`40 tokens`), `1.2m` 근접 트리거, 상시 바닥장애물(`floor_obstacle_node`, `confirm=4f`) & ArUco/한손 제어(`gesture_node`).
 
 ### 💻 Tier 3: 통합 관제 & HMI ([`docs/2_tiers/tier3_control_laptop/`](2_tiers/tier3_control_laptop/))
 * **[host_and_rviz2.md](2_tiers/tier3_control_laptop/host_and_rviz2.md)**: i7-12700H 노트북 스펙, 무소음 iGPU 관제(`ros2basic_nonNV.sh`), Lichtblick(`:8765`) & Pi 5 WebUI 호스팅 전환.
-* **[web_services.md](2_tiers/tier3_control_laptop/web_services.md)**: Pi 5 WebUI(`:9999`, 패스스루+`<canvas>`·`set_dock`·`OpenCR OFF`·👍/✋), Git 뷰어(`:5555`), 문서 뷰어(`:7777`), Git 데몬(`:9418`).
+* **[web_services.md](2_tiers/tier3_control_laptop/web_services.md)**: Pi 5 WebUI(`:9999`, 오프라인 `/tailwind.js`, `/api/estop`, `Condition` MJPEG, `<canvas>`+사람 카운트다운 HUD, 실측 텔레메트리, SLAM `tf2`), Git 뷰어(`:5555`), 문서 뷰어(`:7777`), Git 데몬(`:9418`).
 * **[hud_monitor_viewer.md](2_tiers/tier3_control_laptop/hud_monitor_viewer.md)**: 초경량 OpenCV 네이티브 HUD 뷰어(`yolo_monitor_viewer.py`), 18650 배터리 전압/게이지 및 라이다 실시간 오버레이.
 
 ---
@@ -83,7 +88,7 @@ flowchart LR
 
 매일 수행한 실제 작업 내역, 트러블슈팅 과정 및 검증 결과가 일자별로 투명하게 기록된 일지 모음입니다:
 
-* **[2026-11-24 일지](3_daily_review/2026-11-24_실기스크립트백업_랜덤부팅세레머니_음원개선.md)**: Pi 5(13종)·Jetson(5종) 실기 스크립트/설정/마스크 1:1 백업, `launch_yolo11n.sh` 배포 동기화, `speaker_node.py` `~/music/song` 랜덤 부팅곡 + 인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 (`v1.4.10`).
+* **[2026-11-24 일지](3_daily_review/2026-11-24_실기스크립트백업_랜덤부팅세레머니_음원개선.md)**: Pi 5·Jetson 실기 백업 & 랜덤 부팅 세레머니(`v1.4.10`), Dual Costmap `vision_obstacle_layer`(`v1.4.11`), 3-Tier 안전 핫픽스·VLM Pure On-Demand·오프라인 `/tailwind.js`·실측 텔레메트리·바닥감도 완화(`confirm=4f`)·사람 카운트다운 HUD·`dobingda0.mp3 ➔ dobingda.mp3` 순차재생(`v1.4.12`).
 * **[2026-11-23 일지](3_daily_review/2026-11-23_바닥장애물_ArUco제스처_저전압복귀.md)**: 상시 바닥 장애물 감지(`/vision/scan`) 튜닝, ArUco 숫자 카드(`ID 0~10`) + 한 손(✋/👍) Nav2·자동순찰 제어, OpenCR `10.5V` 저전압 `dock` 복귀, 단절 UI 교정 및 `1.2m/30s/50s` 통일 (`v1.4.9`).
 * **[2026-11-20 일지](3_daily_review/2026-11-20_WebUI패스스루Pi5이전및순찰추종고도화.md)**: WebUI 원본 JPEG 패스스루 + `<canvas>` YOLO 오버레이, Pi 5(`:9999`) 로컬 이전, 지정순찰(`custom_order`)·부팅 볼륨(`80%→95%`)·`1.7m` 통일 (`v1.4.8`).
 * **[2026-11-19 일지](3_daily_review/2026-11-19_Nav2타이트튜닝및순찰고도화.md)**: Nav2 `behavior_server` 정정·좁은공간 탈출 튜닝(`robot_radius 0.145`), `my_map_261113.pgm` 정리·우측 확장, 최단거리/선택 WP/3초확정 음성·20초 사람추종(40초 쿨다운, IDLE 포함), WebUI `LOCALIZING`·배지 교정 및 전 문서 `Approved`/`26-xx-xx` 표준화.

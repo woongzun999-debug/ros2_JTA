@@ -4,6 +4,7 @@
 import json
 import math
 import os
+import signal
 import time
 import yaml
 
@@ -11,6 +12,10 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+try:
+    from rclpy.signals import SignalHandlerOptions
+except ImportError:
+    SignalHandlerOptions = None
 from action_msgs.msg import GoalStatus
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
@@ -75,6 +80,10 @@ class PatrolNode(Node):
         self.dwell_until = 0.0
         self.goal_handle = None
         self._internal_canceled_goals: set[int] = set()
+        self._goal_seq = 0
+        self._active_goal_seq = 0
+        self._active_goal_kind = ''
+        self._active_goal_wp: dict | None = None
         self.waiting_goal_response = False
         self.current_pose: tuple[float, float] | None = None
 
@@ -114,6 +123,7 @@ class PatrolNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.status_pub = self.create_publisher(String, '/patrol/status', 10)
         self.tts_pub = self.create_publisher(String, '/tts/say', 10)
+        self.sound_pub = self.create_publisher(String, '/play/sound', 10)
         self.create_service(SetBool, '/patrol/set_enabled', self._set_enabled_cb)
 
         self.timer = self.create_timer(0.5, self._tick)
@@ -214,7 +224,9 @@ class PatrolNode(Node):
         angle = msg.angle_min
         inc = msg.angle_increment
         for r in msg.ranges:
-            if -0.436 <= angle <= 0.436:
+            # LDS-01(0~2π) 및 (-π~π) 양쪽 포맷 모두 정면 ±25°(±0.436 rad) 대칭 감지
+            norm_angle = math.atan2(math.sin(angle), math.cos(angle))
+            if -0.436 <= norm_angle <= 0.436:
                 if math.isfinite(r) and msg.range_min < r < msg.range_max:
                     if r < min_d:
                         min_d = r
@@ -248,15 +260,18 @@ class PatrolNode(Node):
                 return
 
             self.low_volt_since = None
-            self.low_volt_returning = True
             self._load_waypoints()
 
             if self.dock_pose is None:
+                self.low_volt_returning = True
                 self.get_logger().warn(
                     f'🔋 [Low Battery {voltage:.2f}V] Dock pose not configured -> stopping patrol.'
                 )
                 self.enabled = False
+                self.single_goal_active = False
+                self.single_goal_wp = None
                 self.following_person = False
+                self.person_detect_since = None
                 self._cancel_active_goal()
                 self.stop_robot()
                 self._publish_tts('배터리가 부족하지만 충전소 위치가 지정되지 않았습니다.')
@@ -266,10 +281,18 @@ class PatrolNode(Node):
             if not self.nav_client.server_is_ready():
                 self.nav_client.wait_for_server(timeout_sec=0.5)
                 if not self.nav_client.server_is_ready():
+                    # Nav2 미준비 시 영구 래치하지 않고 5초 뒤 재확인할 수 있게 보류
+                    self.low_volt_since = now
+                    self.enabled = False
+                    self.following_person = False
+                    self.person_detect_since = None
+                    self._cancel_active_goal()
+                    self.stop_robot()
                     self._publish_tts('배터리가 부족합니다. 주행을 정지합니다.')
                     self._publish_status('LOW_BATTERY:NO_NAV2')
                     return
 
+            self.low_volt_returning = True
             self.get_logger().warn(
                 f'🔋 [Low Battery {voltage:.2f}V >= {self.low_volt_hold_sec:.0f}s] Returning to DOCK '
                 f"({self.dock_pose['x']:.2f}, {self.dock_pose['y']:.2f})."
@@ -278,10 +301,9 @@ class PatrolNode(Node):
             self.following_person = False
             self.person_detect_since = None
             self._cancel_active_goal(internal=True)
-            self.single_goal_active = True
-            self.single_goal_wp = dict(self.dock_pose)
+            dock_target = dict(self.dock_pose)
             self._publish_tts('배터리가 부족하여 충전 위치로 복귀합니다.')
-            self._send_waypoint_goal(self.single_goal_wp, status_prefix='DOCK_RETURN')
+            self._send_waypoint_goal(dock_target, status_prefix='DOCK_RETURN', kind='single')
         else:
             self.low_volt_since = None
 
@@ -327,20 +349,22 @@ class PatrolNode(Node):
                     self._publish_status('WAITING_NAV2')
                     return
 
-            target_wp = self.all_waypoints[wp_index - 1]
+            target_wp = dict(self.all_waypoints[wp_index - 1])
             self.enabled = False
             self.following_person = False
             self.person_detect_since = None
             self.follow_cooldown_until = max(self.follow_cooldown_until, time.monotonic() + 5.0)
             self._cancel_active_goal(internal=True)
-            self.single_goal_active = True
-            self.single_goal_wp = target_wp
             self._publish_tts(f'{wp_index}번 웨이포인트로 이동합니다.')
-            self._send_waypoint_goal(target_wp, status_prefix='GESTURE_NAV')
+            self._send_waypoint_goal(target_wp, status_prefix='GESTURE_NAV', kind='single')
             return
 
     def _detections_cb(self, msg: String):
         if not self.follow_person_enabled:
+            return
+        # 저전압 충전 복귀 또는 단일 WP 이동 중에는 사람 추종으로 탈선 금지
+        if self.low_volt_returning or self.single_goal_active:
+            self.person_detect_since = None
             return
         if not self.following_person and not self.zone_enable:
             return
@@ -419,6 +443,11 @@ class PatrolNode(Node):
         msg.data = text
         self.tts_pub.publish(msg)
 
+    def _stop_sound(self):
+        msg = String()
+        msg.data = 'stop'
+        self.sound_pub.publish(msg)
+
     def stop_robot(self):
         """종료 및 순찰 중단 시 /cmd_vel 0.0을 5회 연속 발행."""
         stop_msg = Twist()
@@ -428,6 +457,11 @@ class PatrolNode(Node):
             time.sleep(0.05)
 
     def _cancel_active_goal(self, internal: bool = False):
+        # 진행 중이던 send_goal_async 응답이 뒤늦게 도착해도 즉시 취소되도록 시퀀스 무효화
+        self._goal_seq += 1
+        self._active_goal_seq = 0
+        self._active_goal_kind = ''
+        self._active_goal_wp = None
         if self.goal_handle is not None:
             if internal:
                 self._internal_canceled_goals.add(id(self.goal_handle))
@@ -449,6 +483,7 @@ class PatrolNode(Node):
             self.dwell_until = 0.0
             self.single_goal_active = False
             self.single_goal_wp = None
+            self._cancel_active_goal(internal=True)
             self.enabled = True
             self._publish_status('STARTING')
             start_wp = self.waypoints[self.wp_idx]['name']
@@ -468,6 +503,7 @@ class PatrolNode(Node):
             self._cancel_active_goal()
             self.stop_robot()
             if was_following:
+                self._stop_sound()
                 self._publish_tts('추적을 종료합니다.')
             self._publish_status('STOPPED')
             response.success = True
@@ -475,7 +511,7 @@ class PatrolNode(Node):
             self.get_logger().info('Patrol stopped by service request.')
         return response
 
-    def _send_waypoint_goal(self, wp: dict, status_prefix: str = 'NAVIGATING'):
+    def _send_waypoint_goal(self, wp: dict, status_prefix: str = 'NAVIGATING', kind: str = 'patrol'):
         qz, qw = yaw_to_quaternion(wp['yaw'])
 
         goal = NavigateToPose.Goal()
@@ -488,13 +524,24 @@ class PatrolNode(Node):
         pose.pose.orientation.w = qw
         goal.pose = pose
 
+        wp_copy = dict(wp)
+        self._goal_seq += 1
+        seq = self._goal_seq
+        self._active_goal_seq = seq
+        self._active_goal_kind = kind
+        self._active_goal_wp = wp_copy
+        self.single_goal_active = (kind == 'single')
+        self.single_goal_wp = wp_copy if kind == 'single' else None
+
         self.waiting_goal_response = True
-        self._publish_status(f"{status_prefix}:{wp['name']}")
+        self._publish_status(f"{status_prefix}:{wp_copy['name']}")
         self.get_logger().info(
-            f"Sending goal [{wp['name']}] ({wp['x']:.2f}, {wp['y']:.2f}, yaw={wp['yaw']:.2f})"
+            f"Sending goal [{wp_copy['name']}] ({wp_copy['x']:.2f}, {wp_copy['y']:.2f}, yaw={wp_copy['yaw']:.2f})"
         )
         send_future = self.nav_client.send_goal_async(goal)
-        send_future.add_done_callback(self._goal_response_cb)
+        send_future.add_done_callback(
+            lambda f, s=seq, k=kind, w=wp_copy: self._goal_response_cb(f, s, k, w)
+        )
 
     def _send_current_waypoint(self):
         if not self.waypoints or self.waiting_goal_response or self.goal_handle is not None:
@@ -505,39 +552,95 @@ class PatrolNode(Node):
                 self._publish_status('WAITING_NAV2')
                 return
 
-        self._send_waypoint_goal(self.waypoints[self.wp_idx], status_prefix='NAVIGATING')
+        self._send_waypoint_goal(self.waypoints[self.wp_idx], status_prefix='NAVIGATING', kind='patrol')
 
-    def _goal_response_cb(self, future):
-        self.waiting_goal_response = False
+    def _goal_response_cb(self, future, seq: int = 0, kind: str = 'patrol', wp: dict | None = None):
+        is_current = (seq == self._active_goal_seq)
+        if is_current:
+            self.waiting_goal_response = False
+
         try:
             handle = future.result()
         except Exception as exc:
             self.get_logger().error(f'Goal send failed: {exc}')
-            self._handle_waypoint_failure()
+            if is_current:
+                self._active_goal_seq = 0
+                self._active_goal_kind = ''
+                self._active_goal_wp = None
+                if kind == 'single':
+                    self.single_goal_active = False
+                    self.single_goal_wp = None
+                    self._publish_status('IDLE')
+                else:
+                    self._handle_waypoint_failure()
             return
+
+        stale = (
+            not is_current
+            or self.following_person
+            or (kind == 'patrol' and not self.enabled)
+            or (kind == 'single' and not self.single_goal_active)
+        )
 
         if not handle.accepted:
             self.get_logger().warn('Goal rejected by Nav2.')
-            self._handle_waypoint_failure()
+            if stale:
+                return
+            self._active_goal_seq = 0
+            self._active_goal_kind = ''
+            self._active_goal_wp = None
+            if kind == 'single':
+                wp_name = wp['name'] if wp else 'WP'
+                self.single_goal_active = False
+                self.single_goal_wp = None
+                self._publish_tts(f'{wp_name} 이동이 거부되었습니다.')
+                self._publish_status('IDLE')
+            else:
+                self._handle_waypoint_failure()
+            return
+
+        # 응답 대기 중 ESTOP·정지·추종·신규 Goal로 전환된 경우 즉시 내부 취소 (Nav2 /cmd_vel 충돌 차단)
+        if stale:
+            self._internal_canceled_goals.add(id(handle))
+            try:
+                handle.cancel_goal_async()
+            except Exception as exc:
+                self.get_logger().warn(f'Stale goal cancel warning: {exc}')
+            self.get_logger().info(
+                f'Canceled stale Nav2 goal (seq={seq}, kind={kind}) accepted after state change.'
+            )
             return
 
         self.goal_handle = handle
         result_future = handle.get_result_async()
-        result_future.add_done_callback(lambda f, h=handle: self._goal_result_cb(f, h))
+        result_future.add_done_callback(
+            lambda f, h=handle, s=seq, k=kind, w=wp: self._goal_result_cb(f, h, s, k, w)
+        )
 
-    def _goal_result_cb(self, future, handle=None):
+    def _goal_result_cb(self, future, handle=None, seq: int = 0, kind: str = 'patrol', wp: dict | None = None):
         if handle is None or self.goal_handle is handle:
             self.goal_handle = None
         is_internal_cancel = handle is not None and id(handle) in self._internal_canceled_goals
         if handle is not None:
             self._internal_canceled_goals.discard(id(handle))
 
-        if self.single_goal_active:
-            wp_name = self.single_goal_wp['name'] if self.single_goal_wp else 'WP'
+        # 내부 취소되었거나 이미 새 Goal로 교체된 구버전 콜백은 새 상태를 건드리지 않고 즉시 종료
+        if is_internal_cancel or (seq != 0 and seq != self._active_goal_seq):
+            if is_internal_cancel:
+                wp_name = wp['name'] if wp else 'WP'
+                self.get_logger().info(
+                    f'Goal [{wp_name}] canceled internally (seq={seq}, kind={kind}) -> ignoring stale result.'
+                )
+            return
+
+        self._active_goal_seq = 0
+        self._active_goal_kind = ''
+        self._active_goal_wp = None
+
+        if kind == 'single':
+            wp_name = wp['name'] if wp else (self.single_goal_wp['name'] if self.single_goal_wp else 'WP')
             self.single_goal_active = False
             self.single_goal_wp = None
-            if is_internal_cancel:
-                return
             try:
                 status = future.result().status
             except Exception:
@@ -555,9 +658,13 @@ class PatrolNode(Node):
             elif status == GoalStatus.STATUS_CANCELED:
                 self._publish_status('IDLE')
             else:
-                self.get_logger().warn(f'Gesture single goal [{wp_name}] failed (status={status}).')
-                self._publish_tts(f'{wp_name} 이동에 실패했습니다.')
-                self._publish_status('IDLE')
+                self.get_logger().warn(f'Single goal [{wp_name}] failed (status={status}).')
+                if wp_name == 'DOCK':
+                    self._publish_tts('충전 위치 이동에 실패했습니다.')
+                    self._publish_status('LOW_BATTERY:FAILED')
+                else:
+                    self._publish_tts(f'{wp_name} 이동에 실패했습니다.')
+                    self._publish_status('IDLE')
             return
 
         if not self.enabled:
@@ -571,23 +678,18 @@ class PatrolNode(Node):
             self._handle_waypoint_failure()
             return
 
-        wp = self.waypoints[self.wp_idx]
+        wp_cur = wp if wp is not None else self.waypoints[self.wp_idx]
         if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info(f"Reached [{wp['name']}]. Dwelling {self.dwell_sec:.1f}s.")
+            self.get_logger().info(f"Reached [{wp_cur['name']}]. Dwelling {self.dwell_sec:.1f}s.")
             self.retry_count = 0
             self.dwell_until = time.monotonic() + self.dwell_sec
-            self._publish_status(f"DWELLING:{wp['name']}")
+            self._publish_status(f"DWELLING:{wp_cur['name']}")
         elif status == GoalStatus.STATUS_CANCELED:
-            if is_internal_cancel:
-                self.get_logger().info(
-                    f"Goal [{wp['name']}] canceled internally for person follow -> keeping patrol enabled."
-                )
-                return
-            self.get_logger().warn(f"Goal [{wp['name']}] canceled externally. Stopping patrol.")
+            self.get_logger().warn(f"Goal [{wp_cur['name']}] canceled externally. Stopping patrol.")
             self.enabled = False
             self._publish_status('IDLE')
         else:
-            self.get_logger().warn(f"Goal [{wp['name']}] failed (status={status}).")
+            self.get_logger().warn(f"Goal [{wp_cur['name']}] failed (status={status}).")
             self._handle_waypoint_failure()
 
     def _handle_waypoint_failure(self):
@@ -620,6 +722,7 @@ class PatrolNode(Node):
         ):
             self.following_person = False
             self.stop_robot()
+            self._stop_sound()
             self._publish_tts('추적을 종료합니다.')
             if self.enabled:
                 self.dwell_until = now + 0.5
@@ -657,10 +760,26 @@ class PatrolNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    stop_requested = False
+
+    def _on_signal(signum, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    if SignalHandlerOptions is not None:
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+    else:
+        rclpy.init(args=args)
+
     node = PatrolNode()
     try:
-        rclpy.spin(node)
+        if SignalHandlerOptions is not None:
+            while rclpy.ok() and not stop_requested:
+                rclpy.spin_once(node, timeout_sec=0.1)
+        else:
+            rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:

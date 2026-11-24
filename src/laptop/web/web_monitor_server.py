@@ -102,6 +102,7 @@ import threading
 import yaml
 
 IS_PI5_LOCAL = (platform.machine() == 'aarch64' and os.path.isdir(os.path.expanduser('~/ros2_ws')))
+IS_WEB_MASTER = IS_PI5_LOCAL or (os.environ.get('JTA_WEB_MASTER', '0') == '1')
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -110,8 +111,14 @@ import numpy as np
 
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.time import Time
+try:
+    import tf2_ros
+except ImportError:
+    tf2_ros = None
 from action_msgs.msg import GoalStatus
 from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import Twist, PoseWithCovarianceStamped, PoseStamped
@@ -128,6 +135,7 @@ class GlobalState:
     latest_jpeg_bytes = None
     latest_jpeg_seq = 0
     latest_jpeg_lock = threading.Lock()
+    latest_jpeg_cond = threading.Condition(latest_jpeg_lock)
     latest_yolo_detections = {
         "image_size": [640, 480],
         "objects": [],
@@ -154,6 +162,17 @@ class GlobalState:
         "boxes": [],
         "ts": 0.0,
     }
+    person_tracker = {
+        "detect_since": None,
+        "detect_last": 0.0,
+        "follow_until": 0.0,
+        "cooldown_until": 0.0,
+        "confirm_sec": 3.0,
+        "follow_duration_sec": 30.0,
+        "cooldown_sec": 50.0,
+        "trigger_bh": 250.0,
+        "max_bh": 0.0,
+    }
     latest_yolo_lock = threading.Lock()
     current_volume = 85
 
@@ -168,27 +187,29 @@ class GlobalState:
             "volume": 85
         },
         "tier1_pi5": {
-            "status": "ONLINE",
+            "status": "WAIT",
             "ip": PI5_IP,
-            "voltage": 4.98,
-            "temp": 74.0,
-            "throttled": "0x0 (무결성 유지)",
-            "lidar_status": "5.0 Hz (정상)"
+            "voltage": 0.0,
+            "temp": 0.0,
+            "throttled": "측정 대기 중",
+            "lidar_status": "대기 중"
         },
         "tier1_opencr": {
-            "status": "ONLINE",
-            "voltage": 0.05,
+            "status": "WAIT",
+            "voltage": 0.0,
             "is_switch_on": False,
             "torque": False,
-            "alert": "18650 전원 스위치 OFF (0.05V)"
+            "alert": "OpenCR 수신 대기 중"
         },
         "tier2_jetson": {
-            "status": "ONLINE",
+            "status": "WAIT",
             "ip": JETSON_IP,
-            "ram_total": "7.3 GB",
-            "ram_used": "2.2 GB",
-            "swap_total": "16.0 GB",
-            "swap_used": "0 MB",
+            "ram_total": "-- GB",
+            "ram_used": "-- GB",
+            "ram_pct": 0.0,
+            "swap_total": "-- GB",
+            "swap_used": "-- MB",
+            "temp": None,
             "detected_objects": "대기 중"
         },
         "tier3_laptop": {
@@ -260,6 +281,10 @@ class WebHandler(BaseHTTPRequestHandler):
 
         elif self.path == '/yolo_overlay.js':
             self._serve_static_file('yolo_overlay.js', 'application/javascript; charset=utf-8')
+            return
+
+        elif self.path == '/tailwind.js':
+            self._serve_static_file('tailwind.js', 'application/javascript; charset=utf-8')
             return
 
         elif self.path.startswith('/api/map/state'):
@@ -345,15 +370,15 @@ class WebHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             last_sent_seq = -1
-            last_sent_ts = 0.0
             try:
                 while True:
-                    now = time.time()
-                    with GlobalState.latest_jpeg_lock:
+                    with GlobalState.latest_jpeg_cond:
+                        if GlobalState.latest_jpeg_seq == last_sent_seq:
+                            GlobalState.latest_jpeg_cond.wait(timeout=0.5)
                         frame_bytes = GlobalState.latest_jpeg_bytes
                         frame_seq = GlobalState.latest_jpeg_seq
 
-                    if frame_bytes is not None and (frame_seq != last_sent_seq or (now - last_sent_ts) >= 0.5):
+                    if frame_bytes is not None:
                         part_header = (
                             b'--frame\r\n'
                             b'Content-Type: image/jpeg\r\n'
@@ -362,9 +387,6 @@ class WebHandler(BaseHTTPRequestHandler):
                         self.wfile.write(part_header + frame_bytes + b'\r\n')
                         self.wfile.flush()
                         last_sent_seq = frame_seq
-                        last_sent_ts = now
-
-                    time.sleep(0.015)  # 새 프레임 도착 즉시 송출 (중복 전송 방지)
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
@@ -377,15 +399,45 @@ class WebHandler(BaseHTTPRequestHandler):
                 gst = GlobalState.latest_gesture_state
                 gcmd = GlobalState.latest_gesture_cmd
                 flr = GlobalState.latest_floor_obstacles
+                pt = GlobalState.person_tracker
                 fresh = (now - det["ts"]) < 3.0
                 gst_fresh = (now - gst["ts"]) < 1.0
                 gcmd_fresh = (now - gcmd["ts"]) < 3.0
                 flr_fresh = (now - flr["ts"]) < 1.5
+                if pt["detect_since"] is not None and (now - pt["detect_last"]) > 0.8:
+                    pt["detect_since"] = None
+                if now < pt["follow_until"]:
+                    p_state = "FOLLOWING"
+                    p_rem = max(0.0, pt["follow_until"] - now)
+                    p_total = pt["follow_duration_sec"]
+                    p_elapsed = max(0.0, p_total - p_rem)
+                elif pt["detect_since"] is not None:
+                    p_state = "DETECTING"
+                    p_total = pt["confirm_sec"]
+                    p_elapsed = max(0.0, min(p_total, now - pt["detect_since"]))
+                    p_rem = max(0.0, p_total - p_elapsed)
+                elif now < pt["cooldown_until"]:
+                    p_state = "COOLDOWN"
+                    p_rem = max(0.0, pt["cooldown_until"] - now)
+                    p_total = pt["cooldown_sec"]
+                    p_elapsed = max(0.0, p_total - p_rem)
+                else:
+                    p_state = "IDLE"
+                    p_rem = 0.0
+                    p_total = pt["confirm_sec"]
+                    p_elapsed = 0.0
                 payload = {
                     "image_size": det["image_size"],
                     "objects": det["objects"] if fresh else [],
                     "fresh": fresh,
                     "ts": det["ts"],
+                    "person_countdown": {
+                        "state": p_state,
+                        "elapsed_sec": round(p_elapsed, 2),
+                        "remaining_sec": round(p_rem, 2),
+                        "total_sec": round(p_total, 2),
+                        "max_bh": round(pt["max_bh"], 1),
+                    },
                     "floor_obstacles": {
                         "active": flr_fresh,
                         "roi_top_ratio": flr["roi_top_ratio"] if flr_fresh else 0.60,
@@ -533,6 +585,25 @@ class WebHandler(BaseHTTPRequestHandler):
             msg = "ROS node not available"
             if GlobalState.ros_node_ref is not None:
                 success, msg = GlobalState.ros_node_ref.cancel_all_navigation()
+
+            self.send_response(200 if success else 500)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            with GlobalState.telemetry_lock:
+                patrol_status = GlobalState.telemetry.get('patrol_status', 'IDLE')
+            self.wfile.write(json.dumps({
+                "success": success,
+                "message": msg,
+                "patrol_status": patrol_status,
+            }, ensure_ascii=False).encode('utf-8'))
+            return
+
+        elif self.path == '/api/estop':
+            success = False
+            msg = "ROS node not available"
+            if GlobalState.ros_node_ref is not None:
+                success, msg = GlobalState.ros_node_ref.emergency_stop()
 
             self.send_response(200 if success else 500)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -834,12 +905,17 @@ class WebMonitorNode(Node):
         self.lidar_last_time = time.time()
         self.lidar_hz = 0.0
 
-        # 토픽별 최종 수신 타임스탬프 (No Connect 연결 단절 실시간 감시)
-        self.last_pi5_time = time.time()
-        self.last_lidar_time = time.time()
-        self.last_opencr_time = time.time()
-        self.last_jetson_time = time.time()
-        self.last_camera_time = time.time()
+        # 토픽별 최종 수신 타임스탬프 (실제 수신 전까지 0.0 유지: 가짜 ONLINE 보고 방지)
+        self.last_pi5_time = 0.0
+        self.last_lidar_time = 0.0
+        self.last_opencr_time = 0.0
+        self.last_jetson_time = 0.0
+        self.last_camera_time = 0.0
+        self._amcl_pose_ts = 0.0
+        self._file_cache: dict[str, tuple[float, object]] = {}
+        self._file_cache_lock = threading.Lock()
+        self._turn_seq = 0
+        self._turn_lock = threading.Lock()
 
         # 1초 주기 Watchdog 타이머
         self.watchdog_timer = self.create_timer(1.0, self.watchdog_callback)
@@ -907,6 +983,18 @@ class WebMonitorNode(Node):
             self.pi5_callback,
             qos_realtime
         )
+        self.sub_pi5_sys = self.create_subscription(
+            String,
+            '/pi5/system_state',
+            self.pi5_sys_callback,
+            10
+        )
+        self.sub_jetson_sys = self.create_subscription(
+            String,
+            '/jetson/system_state',
+            self.jetson_sys_callback,
+            10
+        )
         self.sub_scan = self.create_subscription(
             LaserScan,
             '/scan',
@@ -934,10 +1022,10 @@ class WebMonitorNode(Node):
 
         # VLM 수동 브리핑 트리거 발행자 (/vlm/trigger) 및 응답 구독 (/vlm/response)
         self.pub_vlm_trigger = self.create_publisher(String, '/vlm/trigger', 10)
-        # 사람탐지 구역 연동 제어 (/yolo/zone_enable)
+        # 사람탐지 구역 연동 제어 (/yolo/zone_enable): 이중 WebUI 충돌 방지를 위해 마스터(Pi 5)에서만 주기 발행
         self.pub_yolo_zone_enable = self.create_publisher(Bool, '/yolo/zone_enable', 10)
         self._last_yolo_zone_enable = None
-        self.yolo_zone_timer = self.create_timer(1.0, self.evaluate_and_publish_yolo_zone)
+        self.yolo_zone_timer = self.create_timer(1.0, self.evaluate_and_publish_yolo_zone) if IS_WEB_MASTER else None
         self.sub_vlm_response = self.create_subscription(
             String,
             '/vlm/response',
@@ -970,9 +1058,16 @@ class WebMonitorNode(Node):
         self.current_odom_yaw = None
         self.turn_cancel_event = threading.Event()
         self.sub_odom = self.create_subscription(Odometry, '/odom', self.odom_callback, qos_realtime)
+        # SLAM 모드(amcl_pose 미발행)에서 map -> base_footprint TF 폴백용 리스너
+        if tf2_ros is not None:
+            self._tf_buffer = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        else:
+            self._tf_buffer = None
+            self._tf_listener = None
 
         self.get_logger().info("==================================================")
-        self.get_logger().info("  🌐 JTA Bot WebUI & Health Server Started ")
+        self.get_logger().info(f"  🌐 JTA Bot WebUI & Health Server Started (master={IS_WEB_MASTER})")
         self.get_logger().info(f"  📡 Web Port: 9999 (http://{LAPTOP_IP}:9999)")
         self.get_logger().info("==================================================")
 
@@ -1079,9 +1174,16 @@ class WebMonitorNode(Node):
                     return False, f"Pi 5 제어 실패: {err}"
                 return True, "AMCL 초기 위치 재탐색(제자리 회전 수렴)을 시작했습니다."
 
-            # 정지/초기화 명령 시 네트워크 왕복 전에 즉시 모터 브레이크(/cmd_vel 0.0 x5 + 토크 차단) 선행
+            # 정지/초기화 명령 시 즉시 모터 브레이크(/cmd_vel 0.0 x5 + 토크 차단), 모드 전환 시작 시에도 잔류 속도 0.0 선행 발행
             if action in {"nav2_stop", "slam_stop", "full_reset"}:
                 self._stop_cmd_vel_and_torque()
+            elif action in {"nav2_start", "slam_start"}:
+                self.turn_cancel_event.set()
+                stop_msg = Twist()
+                for _ in range(5):
+                    if rclpy.ok():
+                        self.pub_cmd_vel.publish(stop_msg)
+                    time.sleep(0.04)
 
             # 1단계: 기존 Nav2/SLAM 프로세스 안전 정리 (커맨드라인 자폭 방지를 위해 start와 분리 실행)
             res_clean = run_pi5_cmd(pre_clean, timeout_sec=10)
@@ -1204,10 +1306,21 @@ class WebMonitorNode(Node):
 
     def patrol_status_callback(self, msg):
         new_status = str(msg.data or 'IDLE')
+        now = time.time()
         with GlobalState.telemetry_lock:
             prev_status = str(GlobalState.telemetry.get('patrol_status', 'IDLE'))
             GlobalState.telemetry['patrol_status'] = new_status
-        if prev_status.startswith('FOLLOWING') != new_status.startswith('FOLLOWING'):
+        was_following = prev_status.startswith('FOLLOWING')
+        is_following = new_status.startswith('FOLLOWING')
+        if was_following != is_following:
+            with GlobalState.latest_yolo_lock:
+                pt = GlobalState.person_tracker
+                if is_following:
+                    pt["detect_since"] = None
+                    pt["follow_until"] = now + pt["follow_duration_sec"]
+                    pt["cooldown_until"] = now + pt["cooldown_sec"]
+                else:
+                    pt["follow_until"] = 0.0
             self.evaluate_and_publish_yolo_zone()
 
     def set_patrol_enabled(self, enable: bool):
@@ -1247,10 +1360,10 @@ class WebMonitorNode(Node):
         if wp_index < 0 or wp_index >= len(wps):
             return False, f"유효하지 않은 웨이포인트 번호입니다: {wp_index}"
 
-        # 루프 순찰이 동작 중이면 Goal 충돌 방지를 위해 먼저 순찰 중지
+        # 순찰·사람추종·제스처 이동 등 patrol_node가 활성 중이면 Goal 충돌 방지를 위해 먼저 중지
         with GlobalState.telemetry_lock:
             patrol_status = str(GlobalState.telemetry.get('patrol_status', 'IDLE'))
-        if patrol_status.startswith(('NAVIGATING', 'DWELLING', 'RETRY', 'STARTING')):
+        if patrol_status not in ('IDLE', 'STOPPED', 'DOCKED', 'ESTOP:GESTURE'):
             self.set_patrol_enabled(False)
             time.sleep(0.2)
 
@@ -1332,7 +1445,7 @@ class WebMonitorNode(Node):
                     'ts': time.time(),
                     'seq': int(wp_goal.get('seq', 0)),
                 }
-        if patrol_status.startswith(('NAVIGATING', 'DWELLING', 'RETRY', 'STARTING')):
+        if self.cli_patrol.service_is_ready() or patrol_status not in ('IDLE', 'STOPPED', 'DOCKED', 'ESTOP:GESTURE'):
             self.set_patrol_enabled(False)
 
         # 2. Nav2 /navigate_to_pose 모든 활성 Goal 취소 (발신자 무관)
@@ -1351,6 +1464,49 @@ class WebMonitorNode(Node):
 
         return True, "주행 취소 완료 (모터 토크 유지 · 다음 명령 대기)"
 
+    def emergency_stop(self) -> tuple[bool, str]:
+        """원자적 비상 정지(E-STOP): 회전/순찰/추종/Nav2 Goal 전체 취소 + /cmd_vel 0.0 + 모터 토크 즉시 차단."""
+        self.turn_cancel_event.set()
+        self._gesture_auto_patrol_cancel = True
+
+        # 1. 즉각 브레이크 패킷 선행 발행 후 물리 모터 토크 차단
+        stop_msg = Twist()
+        for _ in range(3):
+            if rclpy.ok():
+                self.pub_cmd_vel.publish(stop_msg)
+            time.sleep(0.03)
+        torque_ok, torque_msg = self.set_motor_torque(False)
+
+        # 2. 순찰/추종 및 모든 활성 Nav2 Goal 취소 (추후 모터 ON 복구 시 급발진 차단)
+        with GlobalState.telemetry_lock:
+            patrol_status = str(GlobalState.telemetry.get('patrol_status', 'IDLE'))
+            wp_goal = GlobalState.telemetry.get('wp_goal_status', {})
+            if wp_goal.get('state') == 'MOVING':
+                GlobalState.telemetry['wp_goal_status'] = {
+                    'state': 'CANCELED',
+                    'target': wp_goal.get('target', ''),
+                    'ts': time.time(),
+                    'seq': int(wp_goal.get('seq', 0)),
+                }
+        if self.cli_patrol.service_is_ready() or patrol_status not in ('IDLE', 'STOPPED', 'DOCKED', 'ESTOP:GESTURE'):
+            self.set_patrol_enabled(False)
+
+        if self.cli_nav_cancel.wait_for_service(timeout_sec=0.8):
+            future = self.cli_nav_cancel.call_async(CancelGoal.Request())
+            start_t = time.time()
+            while not future.done() and (time.time() - start_t < 1.2):
+                time.sleep(0.05)
+
+        # 3. 최종 속도 버퍼 0.0 5회 소거
+        for _ in range(5):
+            if rclpy.ok():
+                self.pub_cmd_vel.publish(stop_msg)
+            time.sleep(0.04)
+
+        if torque_ok:
+            return True, "비상 정지 완료 (모터 토크 차단 · 순찰/Nav2 Goal 전체 취소)"
+        return False, f"주행 취소 완료 · 모터 토크 응답 확인 필요: {torque_msg}"
+
     def odom_callback(self, msg: Odometry):
         q = msg.pose.pose.orientation
         self.current_odom_yaw = math.atan2(
@@ -1360,6 +1516,8 @@ class WebMonitorNode(Node):
 
     def publish_cmd_vel(self, linear: float, angular: float) -> bool:
         """2P Teleop 패드로부터 수신한 속도 명령을 안전 범위로 제한해 /cmd_vel 발행"""
+        with self._turn_lock:
+            self._turn_seq += 1
         self.turn_cancel_event.set()
         msg = Twist()
         msg.linear.x = max(-0.25, min(0.25, float(linear)))
@@ -1368,23 +1526,27 @@ class WebMonitorNode(Node):
         return True
 
     def start_turn_angle(self, deg: float) -> tuple[bool, str]:
-        """/odom 피드백 기반으로 지정 각도(90/-90/180도) 제자리 회전"""
-        self.turn_cancel_event.set()
-        time.sleep(0.06)
+        """/odom 피드백 기반으로 지정 각도(90/-90/180도) 제자리 회전 (turn_seq로 연타 레이스 차단)"""
+        with self._turn_lock:
+            self._turn_seq += 1
+            my_seq = self._turn_seq
         self.turn_cancel_event.clear()
 
         target_rad = math.radians(max(-180.0, min(180.0, float(deg))))
+
+        def _is_active():
+            return (not self.turn_cancel_event.is_set()) and (self._turn_seq == my_seq)
 
         def _worker():
             sign = 1.0 if target_rad >= 0.0 else -1.0
             abs_target = abs(target_rad)
             max_dur = abs_target / 0.35 + 3.0
-            start_t = time.time()
+            start_t = time.monotonic()
 
             if self.current_odom_yaw is not None:
                 prev_yaw = self.current_odom_yaw
                 accum = 0.0
-                while not self.turn_cancel_event.is_set() and (time.time() - start_t < max_dur):
+                while _is_active() and (time.monotonic() - start_t < max_dur):
                     cur = self.current_odom_yaw
                     dyaw = math.atan2(math.sin(cur - prev_yaw), math.cos(cur - prev_yaw))
                     accum += dyaw
@@ -1399,19 +1561,46 @@ class WebMonitorNode(Node):
                     time.sleep(0.05)
             else:
                 dur = abs_target / 0.70
-                while not self.turn_cancel_event.is_set() and (time.time() - start_t < dur):
+                while _is_active() and (time.monotonic() - start_t < dur):
                     msg = Twist()
                     msg.angular.z = sign * 0.70
                     self.pub_cmd_vel.publish(msg)
                     time.sleep(0.05)
 
-            stop_msg = Twist()
-            for _ in range(3):
-                self.pub_cmd_vel.publish(stop_msg)
-                time.sleep(0.04)
+            # 새 회전이나 수동 조종으로 대체된 경우에는 이전 스레드가 정지 패킷을 덮어쓰지 않음
+            if self._turn_seq == my_seq:
+                stop_msg = Twist()
+                for _ in range(3):
+                    if self._turn_seq != my_seq:
+                        break
+                    self.pub_cmd_vel.publish(stop_msg)
+                    time.sleep(0.04)
 
         threading.Thread(target=_worker, daemon=True).start()
         return True, f"{deg:+.0f}° 회전 시작"
+
+    def _read_cached_file(self, path: str, parser, default):
+        """mtime 기반 파일 캐싱으로 /api/map/state 폴링 시 반복 디스크 I/O 제거."""
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return default
+        with self._file_cache_lock:
+            cached = self._file_cache.get(path)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                parsed = parser(f)
+        except Exception:
+            return default
+        with self._file_cache_lock:
+            self._file_cache[path] = (mtime, parsed)
+        return parsed
+
+    def _invalidate_file_cache(self, path: str):
+        with self._file_cache_lock:
+            self._file_cache.pop(path, None)
 
     def _get_waypoints_yaml_path(self) -> str:
         candidates = [
@@ -1424,30 +1613,21 @@ class WebMonitorNode(Node):
                 return p
         return candidates[0]
 
-    def load_patrol_waypoints(self) -> list:
+    def _load_waypoints_doc(self) -> dict:
         path = self._get_waypoints_yaml_path()
-        if not os.path.isfile(path):
-            return []
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f) or {}
-            return list(data.get('patrol', {}).get('waypoints', []) or [])
-        except Exception:
-            return []
+        data = self._read_cached_file(path, lambda f: yaml.safe_load(f) or {}, {})
+        return data if isinstance(data, dict) else {}
+
+    def load_patrol_waypoints(self) -> list:
+        data = self._load_waypoints_doc()
+        return [dict(wp) for wp in (data.get('patrol', {}).get('waypoints', []) or []) if isinstance(wp, dict)]
 
     def load_dock_pose(self) -> dict | None:
-        path = self._get_waypoints_yaml_path()
-        if not os.path.isfile(path):
-            return None
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f) or {}
-            d = data.get('patrol', {}).get('dock')
-            if isinstance(d, dict) and 'x' in d and 'y' in d:
-                return {'x': float(d['x']), 'y': float(d['y']), 'yaw': float(d.get('yaw', 0.0))}
-            return None
-        except Exception:
-            return None
+        data = self._load_waypoints_doc()
+        d = data.get('patrol', {}).get('dock')
+        if isinstance(d, dict) and 'x' in d and 'y' in d:
+            return {'x': float(d['x']), 'y': float(d['y']), 'yaw': float(d.get('yaw', 0.0))}
+        return None
 
     def _save_and_sync_waypoints(self, waypoints: list, custom_order: list[int] | None = None, dock: dict | None = None, keep_dock: bool = True) -> tuple[bool, str]:
         path = self._get_waypoints_yaml_path()
@@ -1464,6 +1644,7 @@ class WebMonitorNode(Node):
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+            self._invalidate_file_cache(path)
         except Exception as exc:
             return False, f"로컬 YAML 저장 실패: {exc}"
 
@@ -1576,14 +1757,8 @@ class WebMonitorNode(Node):
 
     def load_detection_zones(self) -> list:
         path = self._get_detection_zones_json_path()
-        if not os.path.isfile(path):
-            return []
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return list(data) if isinstance(data, list) else []
-        except Exception:
-            return []
+        data = self._read_cached_file(path, json.load, [])
+        return list(data) if isinstance(data, list) else []
 
     def save_detection_zones(self, zones: list) -> tuple[bool, str, list]:
         if len(zones) > 20:
@@ -1593,8 +1768,19 @@ class WebMonitorNode(Node):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(zones, f, ensure_ascii=False, indent=2)
+            self._invalidate_file_cache(path)
         except Exception as exc:
             return False, f"탐지 구역 저장 실패: {exc}", self.load_detection_zones()
+        if not IS_PI5_LOCAL:
+            scp_cmd = [
+                "scp", "-F", "/dev/null", "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                path, f"{PI5_USER}@{PI5_IP}:{PI5_HOME}/ros2_ws/src/jta_bringup/config/detection_zones.json"
+            ]
+            try:
+                subprocess.run(scp_cmd, capture_output=True, text=True, timeout=8)
+            except Exception:
+                pass
         self.evaluate_and_publish_yolo_zone()
         return True, f"사람탐지 구역 저장 완료 ({len(zones)}개)", zones
 
@@ -1622,6 +1808,8 @@ class WebMonitorNode(Node):
         return {"has_zones": True, "active": False}
 
     def evaluate_and_publish_yolo_zone(self):
+        if not IS_WEB_MASTER:
+            return
         st = self.get_yolo_zone_state()
         active = bool(st["active"])
         if self._last_yolo_zone_enable != active:
@@ -1639,14 +1827,8 @@ class WebMonitorNode(Node):
 
     def load_hazard_zones(self) -> list:
         path = self._get_hazard_zones_json_path()
-        if not os.path.isfile(path):
-            return []
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return list(data) if isinstance(data, list) else []
-        except Exception:
-            return []
+        data = self._read_cached_file(path, json.load, [])
+        return list(data) if isinstance(data, list) else []
 
     def _rasterize_and_write_masks(self, zones: list, out_dir: str) -> tuple[bool, str]:
         with GlobalState.map_lock:
@@ -1685,7 +1867,7 @@ class WebMonitorNode(Node):
                 if shape == "rect":
                     cv2.rectangle(keepout_img, p1, p2, 0, thickness=-1)
                 else:
-                    thick_px = max(4, int(round(max(0.25, float(z.get("thickness", 0.25))) / res)))
+                    thick_px = max(3, int(round(max(0.15, float(z.get("thickness", 0.15))) / res)))
                     cv2.line(keepout_img, p1, p2, 0, thickness=thick_px)
             elif ztype == "speed":
                 pct = max(10, min(95, int(z.get("speed_pct", 40))))
@@ -1749,6 +1931,7 @@ class WebMonitorNode(Node):
             os.makedirs(os.path.dirname(json_path), exist_ok=True)
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(zones, f, ensure_ascii=False, indent=2)
+            self._invalidate_file_cache(json_path)
         except Exception as exc:
             return False, f"로컬 JSON 저장 실패: {exc}", self.load_hazard_zones()
 
@@ -1800,6 +1983,22 @@ class WebMonitorNode(Node):
             with GlobalState.telemetry_lock:
                 GlobalState.telemetry['tier1_pi5']['lidar_status'] = f"{self.lidar_hz} Hz (정상)"
 
+        # SLAM 모드(/amcl_pose 미발행)에서는 TF map -> base_footprint 폴백으로 로봇 위치 실시간 갱신
+        if self._tf_buffer is not None and (time.monotonic() - self._amcl_pose_ts) > 1.5:
+            try:
+                tf = self._tf_buffer.lookup_transform('map', 'base_footprint', Time(), timeout=Duration(seconds=0.0))
+                t = tf.transform.translation
+                q = tf.transform.rotation
+                yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+                with GlobalState.map_lock:
+                    GlobalState.map_state["robot_pose"] = {
+                        "x": round(float(t.x), 3),
+                        "y": round(float(t.y), 3),
+                        "yaw": round(float(yaw), 4),
+                    }
+            except Exception:
+                pass
+
         with GlobalState.map_lock:
             pose = GlobalState.map_state.get("robot_pose")
             if pose is not None and len(msg.ranges) > 0:
@@ -1842,6 +2041,7 @@ class WebMonitorNode(Node):
             ms["map_png_b64"] = b64
 
     def amcl_pose_callback(self, msg: PoseWithCovarianceStamped):
+        self._amcl_pose_ts = time.monotonic()
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -1888,6 +2088,44 @@ class WebMonitorNode(Node):
             GlobalState.telemetry['tier1_pi5']['voltage'] = msg.voltage
             GlobalState.telemetry['tier1_pi5']['temp'] = msg.temperature
 
+    def pi5_sys_callback(self, msg: String):
+        """Pi 5 실측 쓰로틀링/전압/온도 JSON(/pi5/system_state) 반영."""
+        self.last_pi5_time = time.time()
+        try:
+            data = json.loads(msg.data)
+            with GlobalState.telemetry_lock:
+                if 'voltage' in data:
+                    GlobalState.telemetry['tier1_pi5']['voltage'] = float(data['voltage'])
+                if 'temperature' in data:
+                    GlobalState.telemetry['tier1_pi5']['temp'] = float(data['temperature'])
+                if 'throttled_label' in data:
+                    GlobalState.telemetry['tier1_pi5']['throttled'] = str(data['throttled_label'])
+                elif 'throttled' in data:
+                    GlobalState.telemetry['tier1_pi5']['throttled'] = str(data['throttled'])
+        except Exception:
+            pass
+
+    def jetson_sys_callback(self, msg: String):
+        """Jetson 실측 RAM/Swap/온도 JSON(/jetson/system_state) 반영."""
+        self.last_jetson_time = time.time()
+        try:
+            data = json.loads(msg.data)
+            with GlobalState.telemetry_lock:
+                if 'ram_total_gb' in data:
+                    GlobalState.telemetry['tier2_jetson']['ram_total'] = f"{float(data['ram_total_gb']):.1f} GB"
+                if 'ram_used_gb' in data:
+                    GlobalState.telemetry['tier2_jetson']['ram_used'] = f"{float(data['ram_used_gb']):.1f} GB"
+                if 'ram_pct' in data:
+                    GlobalState.telemetry['tier2_jetson']['ram_pct'] = float(data['ram_pct'])
+                if 'swap_total_gb' in data:
+                    GlobalState.telemetry['tier2_jetson']['swap_total'] = f"{float(data['swap_total_gb']):.1f} GB"
+                if 'swap_used_mb' in data:
+                    GlobalState.telemetry['tier2_jetson']['swap_used'] = f"{int(data['swap_used_mb'])} MB"
+                if 'temp_c' in data:
+                    GlobalState.telemetry['tier2_jetson']['temp'] = data['temp_c']
+        except Exception:
+            pass
+
     def json_callback(self, msg):
         now = time.time()
         self.last_jetson_time = now
@@ -1898,12 +2136,38 @@ class WebMonitorNode(Node):
             img_size = data.get('image_size', [640, 480])
             if not (isinstance(img_size, list) and len(img_size) == 2):
                 img_size = [640, 480]
+            best_person_bh = 0.0
+            if not data.get('zone_paused'):
+                for obj in objs:
+                    if obj.get('class_name') == 'person' and float(obj.get('conf', obj.get('confidence', 0.0))) >= 0.50:
+                        size = obj.get('size')
+                        if isinstance(size, list) and len(size) >= 2:
+                            bh = float(size[1])
+                        else:
+                            box = obj.get('box') or obj.get('bbox') or []
+                            bh = (float(box[3]) - float(box[1])) if len(box) == 4 else 0.0
+                        if bh > best_person_bh:
+                            best_person_bh = bh
             with GlobalState.latest_yolo_lock:
                 GlobalState.latest_yolo_detections = {
                     "image_size": img_size,
                     "objects": objs,
                     "ts": now,
                 }
+                pt = GlobalState.person_tracker
+                pt["max_bh"] = best_person_bh
+                if now < pt["follow_until"]:
+                    pt["detect_since"] = None
+                elif best_person_bh >= pt["trigger_bh"] and now >= pt["cooldown_until"]:
+                    if pt["detect_since"] is None or (now - pt["detect_last"]) > 0.8:
+                        pt["detect_since"] = now
+                    pt["detect_last"] = now
+                    if (now - pt["detect_since"]) >= pt["confirm_sec"]:
+                        pt["detect_since"] = None
+                        pt["follow_until"] = now + pt["follow_duration_sec"]
+                        pt["cooldown_until"] = now + pt["cooldown_sec"]
+                elif pt["detect_since"] is not None and (now - pt["detect_last"]) > 0.8:
+                    pt["detect_since"] = None
             names = [f"{o.get('class_name', '')} ({o.get('conf', o.get('confidence', 0)):.0%})" for o in objs[:3]]
             detected_summary = ", ".join(names) if names else "없음"
             with GlobalState.telemetry_lock:
@@ -1939,7 +2203,7 @@ class WebMonitorNode(Node):
                     "wp_index": wp_idx,
                     "ts": now,
                 }
-            if cmd in ("NAV2_START", "NAV2_STOP"):
+            if IS_WEB_MASTER and cmd in ("NAV2_START", "NAV2_STOP"):
                 threading.Thread(
                     target=self._handle_gesture_nav2_action,
                     args=(cmd,),
@@ -1969,18 +2233,19 @@ class WebMonitorNode(Node):
 
     def _wait_and_start_auto_patrol(self):
         """Nav2 기동 및 auto_localizer 완료를 대기한 뒤 자동 순찰(/patrol/set_enabled=True) 시작."""
-        deadline = time.time() + 75.0
-        # 1단계: Nav2 프로세스가 기동될 때까지 잠시 대기
-        time.sleep(4.0)
-        while time.time() < deadline:
+        deadline = time.monotonic() + 75.0
+        # 1단계: Nav2 및 auto_localizer 프로세스가 그래프에 올라올 때까지 초기 유예 대기 (조기 출발 방지)
+        time.sleep(6.0)
+        while time.monotonic() < deadline:
             if self._gesture_auto_patrol_cancel:
                 self.get_logger().info("[Gesture AutoPatrol] 사용자 종료 요청으로 대기 취소")
                 return
             mode = self.get_nav_mode()
             if mode == "NAV2" and self.cli_patrol.service_is_ready():
                 time.sleep(1.5)
-                if self._gesture_auto_patrol_cancel:
-                    return
+                if self._gesture_auto_patrol_cancel or self.get_nav_mode() != "NAV2":
+                    continue
+                self.set_motor_torque(True)
                 ok, p_msg = self.set_patrol_enabled(True)
                 self.get_logger().info(f"[Gesture AutoPatrol] ok={ok}, msg={p_msg}")
                 if ok:
@@ -2006,6 +2271,7 @@ class WebMonitorNode(Node):
                 if current_mode == "NAV2":
                     self._last_gesture_nav_ts = now
                     self._gesture_auto_patrol_cancel = False
+                    self.set_motor_torque(True)
                     ok, p_msg = self.set_patrol_enabled(True)
                     self.get_logger().info(f"[Gesture NAV2_START->Patrol] ok={ok}, msg={p_msg}")
                     if ok:
@@ -2050,9 +2316,10 @@ class WebMonitorNode(Node):
         # 원본 JPEG 패스스루 (서버 측 imdecode/박스 합성/imencode 제거 → CPU 0% & 원본 화질 유지)
         # YOLO 바운딩 박스는 브라우저 <canvas>가 /api/yolo 좌표를 받아 직접 렌더링
         if msg.data:
-            with GlobalState.latest_jpeg_lock:
+            with GlobalState.latest_jpeg_cond:
                 GlobalState.latest_jpeg_bytes = bytes(msg.data)
                 GlobalState.latest_jpeg_seq += 1
+                GlobalState.latest_jpeg_cond.notify_all()
 
     def watchdog_callback(self):
         """1초 주기로 노드별 최종 수신 시간을 점검하여 3초 초과 시 NO_CONNECT 전환"""
@@ -2065,7 +2332,7 @@ class WebMonitorNode(Node):
             if pi5_alive:
                 GlobalState.telemetry['tier1_pi5']['status'] = 'ONLINE'
                 if GlobalState.telemetry['tier1_pi5']['throttled'] == 'NO CONNECT':
-                    GlobalState.telemetry['tier1_pi5']['throttled'] = '0x0 (무결성 유지)'
+                    GlobalState.telemetry['tier1_pi5']['throttled'] = '측정 대기 중'
             else:
                 GlobalState.telemetry['tier1_pi5']['status'] = 'NO_CONNECT'
                 GlobalState.telemetry['tier1_pi5']['lidar_status'] = 'NO CONNECT (신호 없음)'
@@ -2140,7 +2407,8 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

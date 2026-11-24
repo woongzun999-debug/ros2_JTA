@@ -1,6 +1,6 @@
 # 🤖 Raspberry Pi 5: `jta_camera` & `jta_bringup` 패키지화 및 부팅 자동 실행 기술 명세서
 
-> **문서 버전**: v1.4.10  
+> **문서 버전**: v1.4.12  
 > **점검일**: 2026-11-24  
 > **대상 기기**: Raspberry Pi 5 (`<PI5_IP>:22`, 계정: `<PI_USER>`, 컨테이너: `distrobox humble`)  
 > **작성자**: `ROS2_JW`
@@ -16,7 +16,9 @@
 | `v1.4.7` | 26.11.19 | ROS2_JW | Approved | • Nav2 `behavior_server` 정정(`simulate_ahead_time: 0.5`)·좁은공간 탈출 튜닝(`robot_radius: 0.145`, `inflation: 0.19`, `planner 2Hz`)<br>• `patrol_node` 최단거리·선택 WP(`enabled`)·Option B 내부취소 추적·3초확정 20초 추종(40초 쿨다운, IDLE 포함) 반영 |
 | `v1.4.8` | 26.11.20 | ROS2_JW | Approved | • `speaker_node` 부팅 볼륨(`80%→95%`)<br>• `patrol_node` 지정순찰(`custom_order`)·추적 종료 `/tts/say` `"추적을 종료합니다."`·사람 감지 `1.7m(176px)` 통일 및 `FOLLOWING` 중 `/yolo/zone_enable=True` 유지 반영 |
 | `v1.4.9` | 26.11.23 | ROS2_JW | Approved | • `nav2_params.yaml` `vision_scan`(`/vision/scan`) 바닥장애물 레이어 추가<br>• `patrol_node` `/gesture/cmd`(ArUco `ESTOP`/`GOTO_WP`)·`10.5V` 저전압 `dock` 복귀 및 사람 추종 `1.2m(250px)/30초/50초` 통일 반영 |
-| **`v1.4.10`** | 26.11.24 | **ROS2_JW** | **Approved** | • Pi 5 실기 부팅/내부 런처(`inner_*_launch.sh`)·`pi5_power_daemon.py`·`patrol_waypoints.yaml`(`dock`)·`detection_zones.json`·마스크 1:1 백업<br>• `speaker_node` `~/music/song` 랜덤 선곡+인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 반영 |
+| `v1.4.10` | 26.11.24 | ROS2_JW | Approved | • Pi 5 실기 부팅/내부 런처(`inner_*_launch.sh`)·`pi5_power_daemon.py`·`patrol_waypoints.yaml`(`dock`)·`detection_zones.json`·마스크 1:1 백업<br>• `speaker_node` `~/music/song` 랜덤 선곡+인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 반영 |
+| `v1.4.11` | 26.11.24 | ROS2_JW | Approved | • `nav2_params.yaml` `local_costmap` `vision_obstacle_layer` 분리, `MPPI` `CostCritic: 4.0`/`PathAlignCritic: 9.0`, `inflation_radius: 0.25`/`cost_scaling_factor: 7.0` 튜닝 반영 |
+| **`v1.4.12`** | 26.11.24 | **ROS2_JW** | **Approved** | • `stop.sh` CycloneDDS+`/motor_power false`, `patrol_node` `atan2` 우측 라이다 사각 해소·`goal_seq` 경합 차단·저전압 가드·`SIGTERM` 안전정지·추종종료 `"stop"`<br>• `auto_localizer`/`camera_node` `monotonic()` 안정화, `run_robot_autostart.sh` 선행 중복검사, `speaker_node` `UACDemoV10`·`8s` 타임아웃·`dobingda0.mp3 ➔ dobingda.mp3` 순차재생<br>• `pi5_power_node` `/pi5/system_state`, `nav2_params` `raytrace 0.0`·`20Hz`·`base_footprint` 통일 반영 |
 
 ---
 
@@ -96,8 +98,8 @@ ros2_ws/src/
 ### 3.2 핵심 소스 코드 분석
 
 #### (1) `jta_camera/camera_node.py` (초저지연 CSI 드라이버)
-* **하드웨어 180도 플립**: OpenCV 소프트웨어 회전(`cv2.rotate`) 대신 `v4l2-ctl` subdev 하드웨어 레지스터를 직접 반전(`hflip=1, vflip=1`)하여 **CPU 연산 부하 0% 달성**.
-* **초고속 C-LUT 화이트밸런스**: 라즈베리파이 5 RP1 칩의 RAW8(BA81) 비트맵을 직수신하고 고정 변환 룩업테이블(LUT)을 적용하여 ~3ms 이내 BGR 변환 완료.
+* **하드웨어 180도 플립 & 동적 엔티티 탐색**: OpenCV 소프트웨어 회전(`cv2.rotate`) 대신 `v4l2-ctl` subdev 하드웨어 레지스터를 직접 반전(`hflip=1, vflip=1`)하여 **CPU 연산 부하 0% 달성**. `get_imx219_info()`로 하드코딩(`imx219 10-0010`) 없이 재부팅마다 변하는 미디어 장치/엔티티명을 동적 탐색합니다.
+* **초고속 C-LUT 화이트밸런스 & 안정화 (`v1.4.12`)**: 라즈베리파이 5 RP1 칩의 RAW8(BA81) 비트맵을 직수신하고 고정 변환 룩업테이블(LUT)을 적용하여 ~3ms 이내 BGR 변환 완료. `time.monotonic()` 프레임 페이싱, `rclpy.spin_once(self, timeout_sec=0.0)` 논블로킹 스핀 및 종료 시 `proc.wait(timeout=2.0)` + `kill()`을 적용했습니다.
 * **JPEG Quality 90 압축 스트리밍**: 640×480 JPEG(Q90) · 15 FPS 단일 스트림으로 Wi-Fi 대역폭을 ~3.5Mbps 수준으로 유지해 100Mbps 공유기 환경에서도 안정 송출.
 
 #### (2) `jta_camera/launch/camera.launch.py`
@@ -183,6 +185,14 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 sleep 5
+
+# 0. 선행 중복 실행 체크 (v1.4.12: 플래그 삭제 및 fuser -k 이전 최상단 배치)
+RUNNING=$(pgrep -f "robot.launch.py|turtlebot3_ros|hlds_laser_publisher" 2>/dev/null)
+if [ -n "$RUNNING" ]; then
+    echo "[autostart] Robot node is already running." >> "$HOME/robot_autostart.log"
+    exit 0
+fi
+
 rm -f /dev/shm/pi5_boot_ceremony_done /tmp/pi5_boot_ceremony_done > /dev/null 2>&1
 
 # 1. OpenCR 디바이스 연결 확인 (최대 15초 대기)
@@ -197,14 +207,9 @@ if ! pgrep -f "pi5_power_daemon.py" > /dev/null; then
     nohup /usr/bin/python3 "$HOME/pi5_power_daemon.py" > /dev/null 2>&1 &
 fi
 
-# 3. 포트 Pre-Clean 및 중복 실행 방지 후 Distrobox 내부 런처 호출
+# 3. 포트 Pre-Clean 후 Distrobox 내부 런처 호출
 fuser -k /dev/ttyACM0 /dev/ttyUSB0 /dev/video0 > /dev/null 2>&1
 sleep 1
-RUNNING=$(pgrep -f "robot.launch.py|turtlebot3_ros|hlds_laser_publisher" 2>/dev/null)
-if [ -n "$RUNNING" ]; then
-    echo "[autostart] Robot node is already running." >> "$HOME/robot_autostart.log"
-    exit 0
-fi
 
 nohup distrobox enter humble -- "$HOME/inner_robot_launch.sh" > "$HOME/robot_autostart.log" 2>&1 &
 echo "[autostart] Successfully initiated robot.launch.py at $(date)" >> "$HOME/robot_autostart.log"
@@ -246,7 +251,8 @@ ps aux | grep -E "turtlebot3|camera_node|laser"
   3. `camera_node` (IMX219 640x480 압축 영상 스트리밍)
 
 ### 5.3 수동 비상 정지 및 수동 기동
-* **비상 정지 (모터 0 속도 강제 송신 및 프로세스 종료)**:
+* **비상 정지 (`stop.sh`, `v1.4.12` 호스트/컨테이너 겸용 CycloneDDS E-Stop)**:
+  * `ROS_DOMAIN_ID=30`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `CYCLONEDDS_URI=file://$HOME/cyclonedds.xml` 자동 로드 및 `0.35s` DDS 매칭 대기 후 `/motor_power false` · `/patrol/set_enabled false` · `/navigate_to_pose/_action/cancel_goal` · `/cmd_vel 0.0` ×5 ×2회를 실행합니다.
   ```bash
   <PI_HOME>/stop.sh
   pkill -f robot.launch.py
@@ -260,22 +266,26 @@ ps aux | grep -E "turtlebot3|camera_node|laser"
 
 ---
 
-## 6. Nav2 통합 런치 · `patrol_node` & `10.5V` 복귀 (`v1.4.7 ~ v1.4.9`)
+## 6. Nav2 통합 런치 · `patrol_node` · 오디오 & 실측 전원 감시 (`v1.4.7 ~ v1.4.12`)
 
 * **분리 기동 정책**: `robot.launch.py`의 `enable_nav2` 기본값은 `False`로 유지하고, 필요 시 `:9999` WebUI(PIN 또는 👍 엄지척)나 `ros2 launch jta_bringup nav2.launch.py`로 독립 기동합니다.
 * **전역 초기 위치 추정 (`jta_bringup/auto_localizer.py`)**:
   * 기동 시 `/reinitialize_global_localization` 호출 후 `/request_nomotion_update` 3회 선행 필터링을 수행합니다.
-  * `auto_spin:=True`(기본값) 시 `0.5 rad/s`로 최대 `20.0s` 회전하며 `cov <= 0.02` 달성 시 즉시 정지(`/cmd_vel 0.0` × 5 + `rclpy.spin_once` 및 `0.25s` DDS 플러시 대기)합니다.
+  * `auto_spin:=True`(기본값) 시 `time.monotonic()` 타이머 기반 `0.5 rad/s`로 최대 `20.0s` 회전하며 `cov <= 0.02` 달성 또는 `SIGTERM`/`SIGINT`(`SignalHandlerOptions.NO`) 수신 시 즉시 정지(`/cmd_vel 0.0` × 5 + `rclpy.spin_once` 및 `0.25s` DDS 플러시 대기)합니다.
 * **실주행 Costmap / MPPI / 바닥장애물 튜닝 (`config/nav2_params.yaml`)**:
   * **AMCL**: `max_particles: 5000`, `max_beams: 180`, `z_hit: 0.9`, `z_rand: 0.1`, `sigma_hit: 0.08`, `update_min_d: 0.08`, `update_min_a: 0.05`, `recovery_alpha_fast: 0.1`, `recovery_alpha_slow: 0.001`(주행 중 위치 이탈 시 자동 복구).
-  * **로컬 컨트롤러 (`MPPIController`)**: `motion_model: "DiffDrive"`, `batch_size: 600`, `time_steps: 25`, `model_dt: 0.1`, `vx_max: 0.16`, `vx_min: -0.10`(후진 탈출), `wz_max: 1.2`, Critics 8종 적용.
-  * **`local_costmap` / `global_costmap`**: `obstacle_layer` 단일화, `resolution: 0.025 / 0.05`, `robot_radius: 0.145`, `inflation_radius: 0.19`, `cost_scaling_factor: 15.0`, `KeepoutFilter`/`SpeedFilter` (`/keepout_filter_mask`, `/speed_filter_mask`) 및 `local_costmap` **`vision_scan` (`/vision/scan`, `0.20~1.50m`, `raytrace 1.8m`)** 바닥장애물 레이어 결합.
-  * **`behavior_server`**: `nav2_behaviors/Spin|BackUp|Wait`, `robot_base_frame: base_link`, `simulate_ahead_time: 0.5`, `use_sim_time: False`.
-* **다중·지정 순찰 / ArUco 제어 / `10.5V` 복귀 (`jta_bringup/patrol_node.py`, `config/patrol_waypoints.yaml`)**:
+  * **로컬 컨트롤러 (`MPPIController`)**: `motion_model: "DiffDrive"`, `batch_size: 600`, `time_steps: 25`, `model_dt: 0.1`, `vx_max: 0.16`, `vx_min: -0.10`(후진 탈출), `wz_max: 0.9`, Critics 8종 (`CostCritic: 4.0`, `PathAlignCritic: 9.0` 바닥 회피 보강).
+  * **`local_costmap` / `global_costmap`**: `local_costmap`은 `obstacle_layer`(`/scan`)와 **`vision_obstacle_layer` (`/vision/scan`, `combination_method: 1`, `obstacle 0.20~1.50m`, `raytrace 0.0~1.8m`)** 분리 및 `resolution: 0.025`, `robot_radius: 0.145`, `inflation_radius: 0.25`, `cost_scaling_factor: 7.0`; `global_costmap`은 `resolution: 0.05`, `inflation_radius: 0.19`, `cost_scaling_factor: 15.0`, `KeepoutFilter`/`SpeedFilter` (`/keepout_filter_mask`, `/speed_filter_mask`) 결합.
+  * **`behavior_server` & `waypoint_follower`**: 전 모듈 `robot_base_frame: base_footprint` 통일(Galactic 레거시 `bt_navigator` 키 제거), `behavior_server`(`nav2_behaviors/Spin|BackUp|Wait`, `simulate_ahead_time: 0.5`), `waypoint_follower.loop_rate: 20`(기존 200Hz 대비 Pi 5 CPU 절감).
+* **다중·지정 순찰 / ArUco 제어 / 안전 상태 머신 (`jta_bringup/patrol_node.py`, `config/patrol_waypoints.yaml`)**:
   * `nav2.launch.py`에서 `enable_patrol:=True`, `patrol_auto_start:=False`(IDLE 대기)로 기동되며, 최단거리/선택 WP/지정순찰(`custom_order`) 순환을 지원합니다.
-  * **사람 근접 추종**: 탐지구역 내 `1.2m(bh >= 250px)` 사람 `3.0초` 연속 감지 확정 시 `30초` 비주얼 서보잉 추종(종료 시 `"추적을 종료합니다."` TTS, 확정 시점 기준 `50초` 쿨다운).
+  * **라이다·상태 경합·종료 가드 (`v1.4.12`)**: `_scan_cb()` `math.atan2(math.sin(a), math.cos(a))` 정규화로 LDS-01 우측 전방(`335~359°`) 사각 해소, `goal_seq`/`kind` 추적으로 `DOCK_RETURN`/`GOTO_WP` `single_goal_active` 덮어쓰기·응답 경합 차단, `low_volt_returning`/`single_goal_active` 중 사람 추종 진입 차단, `SignalHandlerOptions.NO` + `SIGTERM`/`SIGINT` 안전 정지 보장.
+  * **사람 근접 추종**: 탐지구역 내 `1.2m(bh >= 250px)` 사람 `3.0초` 연속 감지 확정 시 `30초` 비주얼 서보잉 추종(종료 시 `"추적을 종료합니다."` TTS + `/play/sound "stop"` 발행, 확정 시점 기준 `50초` 쿨다운).
   * **ArUco 명령 연동 (`/gesture/cmd`)**: `ESTOP` 수신 시 Goal 취소·정지·TTS, `GOTO_WP` 수신 시 등록 WP 1~10 단일 이동·도착 TTS.
   * **저전압 자동 복귀 (`dock`)**: `/battery_state` `9.0V < V <= 10.5V` `5.0초` 연속 지속 시 1회 래치 후 `patrol.dock` 좌표로 자율 복귀(`DOCK_RETURN` / `DOCKED` + TTS, `11.5V` 회복 시 래치 해제).
-* **부팅 세레머니 & 사람 감지 음원 (`speaker_node.py`, `v1.4.10`)**:
+* **부팅 세레머니 & 사람 감지 음원 (`speaker_node.py`, `v1.4.10 ~ v1.4.12`)**:
+  * **오디오 안정화**: `amixer -c UACDemoV10`(폴백 `-c 0`) 카드명 지정, `proc_lock` 기반 원자적 오디오 프로세스 교체, Edge-TTS `asyncio.wait_for(..., timeout=8.0)`, `finally` 종료 정리.
   * **랜덤 선곡 + 인트로 TTS**: `/dev/shm/pi5_boot_ceremony_done` 부재 시 `~/music/song` 내 `.mp3`/`.wav` 중 1곡을 무작위 선곡(폴백 없음) ➔ `80%` 볼륨 *"노래 한 곡 듣고 가시죠."* Edge-TTS ➔ `1.0초` 대기 ➔ 완곡 재생(`"stop"` 즉시 스킵) ➔ `95%` *"시스템을 동작합니다."* 발화.
-  * **`dobingda.mp3` Edge-TTS 안내 음성 대체**: `ko-KR-SunHiNeural` 4단 멘트(*"사람이 감지되었습니다." × 2 ➔ "용건을 말씀해 주세요." ➔ 2.95s 무음 ➔ "앗! 죄송합니다. 제가 마이크가 없네요... 허허.."*, 원본 `dobingda.mp3.bak` 보존).
+  * **`dobingda` 순차 재생**: 사람 근접 `/play/sound "dobingda"` 수신 시 **`dobingda0.mp3`**(`ko-KR-SunHiNeural` 4단 안내 멘트) 완곡 후 **`dobingda.mp3`**를 순차 재생하며, 추종 종료 등으로 `"stop"` 신호 수신 시 즉시 취소합니다.
+* **실측 전원·열 상태 발행 (`pi5_power_node.py`, `v1.4.12`)**:
+  * `/pi5/battery_state`와 함께 1Hz 주기 `/pi5/system_state`(`std_msgs/String` JSON)로 `vcgencmd get_throttled` 실측 16진수 값 및 한국어 디코딩 상태를 발행해 WebUI에 즉시 노출합니다(실기 검증에서 `5.18V` 정상 전압 하 `84.0°C` 열 쓰로틀링 `0xe0006` 즉시 포착).

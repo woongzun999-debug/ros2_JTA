@@ -1,6 +1,6 @@
 # 🤖 ros2_JTA: 3-Tier 분산 자율주행 & 엣지 AI 로봇 시스템
 
-> **버전**: `v1.4.10` | **점검일**: 2026-11-24  
+> **버전**: `v1.4.12` | **점검일**: 2026-11-24  
 > **Raspberry Pi 5 + OpenCR 1.0**(하드웨어 센서 I/O & 모터 폐쇄 루프) ↔ **Jetson Orin Nano**(엣지 AI YOLO11 / Qwen2-VL VLM 브레인) ↔ **Control Laptop Host PC**(반응형 WebUI 관제 & iGPU 3D 디지털 트윈 관제)로 구성된 ROS 2 Humble 기반 3-Tier 분산 자율주행 및 물리 AI(Physical AI) 로봇 시스템입니다.
 
 ---
@@ -10,21 +10,21 @@
 ```mermaid
 flowchart LR
     subgraph Tier1["🍓 Tier 1: 센서 & 구동계 (Mobile AMR)"]
-        RPi5["Raspberry Pi 5 (PI5_IP)<br>• IMX219 CSI 카메라 (Full FOV 640x480 Q90)<br>• LDS-01 2D LiDAR (360도 스캔, BEST_EFFORT)<br>• OpenCR 1.0 (STM32F746 휠 PID 제어)<br>• 18650 10.5V 저전압 dock 자동 복귀 & E-Stop 감시<br>• jta_bringup 통합 런치 & 오토스타트"]
+        RPi5["Raspberry Pi 5 (PI5_IP)<br>• IMX219 CSI 카메라 (Full FOV 640x480 Q90)<br>• LDS-01 2D LiDAR (360도 스캔, BEST_EFFORT)<br>• OpenCR 1.0 (STM32F746 휠 PID 제어)<br>• 18650 10.5V 저전압 dock 복귀 · /pi5/system_state · CycloneDDS stop.sh<br>• jta_bringup 통합 런치 · Dual Costmap(vision_obstacle_layer) · 오토스타트"]
     end
 
     subgraph Tier2["🤖 Tier 2: 엣지 AI 브레인 (Edge Brain)"]
-        Jetson["Jetson Orin Nano (JETSON_IP:2222)<br>• NVIDIA Ampere GPU 가속<br>• YOLO11n 실시간 추론 (0.1ms JSON 좌표 발행)<br>• Qwen2-VL 4-bit 상주 VLM 서비스 (vlm_service_node)<br>• 상시 바닥 장애물(/vision/scan) · ArUco/한손 제어(/gesture/cmd)"]
+        Jetson["Jetson Orin Nano (JETSON_IP:2222)<br>• NVIDIA Ampere GPU 가속<br>• YOLO11s 실시간 추론 (0.1ms JSON, /jetson/system_state)<br>• Qwen2-VL 4-bit Pure On-Demand VLM (VRAM 1.42GB, Lazy JPEG)<br>• 상시 바닥 장애물(/vision/scan) · ArUco/한손 제어(/gesture/cmd)"]
     end
 
     subgraph Tier3["💻 Tier 3: 통합 관제 (Control Laptop)"]
-        Laptop["Control Laptop (LAPTOP_IP)<br>• i7-12700H + iGPU 저전력 무소음 관제<br>• 반응형 WebUI 관제 (:9999, 실시간 Watchdog)<br>• 실시간 HUD 배터리 뷰어 (yolo_monitor_viewer)<br>• Git 뷰어(:5555) & 문서 뷰어(:7777)<br>• RViz2 3D 디지털 트윈 관제"]
+        Laptop["Control Laptop (LAPTOP_IP)<br>• i7-12700H + iGPU 저전력 무소음 관제<br>• 반응형 WebUI (:9999, 오프라인 /tailwind.js, /api/estop, 실측 텔레메트리)<br>• 실시간 HUD 배터리 뷰어 (yolo_monitor_viewer)<br>• Git 뷰어(:5555) & 문서 뷰어(:7777)<br>• RViz2 / Lichtblick 3D 디지털 트윈 관제"]
     end
 
     RPi5 -- "/camera/image_raw/compressed (Q90)" --> Jetson
     RPi5 -- "/camera/image_raw/compressed (무선 관제)" --> Laptop
-    RPi5 -- "/scan (BEST_EFFORT), /battery_state" --> Laptop
-    Jetson -- "/yolo/detections (경량 JSON 좌표)" --> Laptop
+    RPi5 -- "/scan (BEST_EFFORT), /battery_state, /pi5/system_state" --> Laptop
+    Jetson -- "/yolo/detections (JSON), /jetson/system_state" --> Laptop
     Laptop -- "/cmd_vel (주행 및 E-Stop)" --> RPi5
 ```
 
@@ -34,9 +34,9 @@ flowchart LR
 
 | Tier | 기기명 | IP&nbsp;/&nbsp;계정 | 주요 역할 | 하드웨어 & 실행 환경 | 핵심 소프트웨어 / 패키지 |
 | :---: | :--- | :--- | :--- | :--- | :--- |
-| **Tier&nbsp;1** | **Raspberry Pi 5**<br>(+ OpenCR 1.0) | `<PI5_IP>`<br>(`<PI_USER>`) | • 물리 센서 I/O & 모터 제어<br>• `10.5V` 저전압 자동 복귀(`dock`) & E-Stop 감시<br>• 부팅 시 모터 폭주 방지 (토크 잠금)<br>• 무인 자동 기동 (Linger) | • Cortex-A76 8GB RAM<br>• 5.2V 5A DC-DC 벅 컨버터 직결<br>• 언더볼티지 박멸 (`vcgencmd: 0x0`)<br>• Distrobox `humble` (ROS 2 / OpenCR / LiDAR / Nav2) | `jta_bringup` (`robot.launch.py`, `nav2.launch.py`, `patrol_node`)<br>`jta_camera` (CSI 카메라 노드)<br>`hlds_laser_publisher` (LiDAR)<br>`turtlebot3_node` (OpenCR `/dev/ttyACM0`)<br>`nav2_bringup` / `slam_toolbox` |
-| **Tier&nbsp;2** | **Jetson Orin Nano** | `<JETSON_IP>:2222`<br>(`<JETSON_USER>`) | • Ampere GPU `yolo11n` 실시간 객체인식<br>• VLM 4-bit NF4 상주 서비스 (`VRAM 1.42GB`)<br>• 상시 바닥 장애물(`/vision/scan`) & ArUco·한손 제어(`/gesture/cmd`) | • 6-Core A78AE + 1024 CUDA Ampere GPU<br>• 8GB RAM + 16GB NVMe Swap<br>• TUI 모드 (OS 400MB) + Docker (`my_ros2_robot`) | `yolo11n` (`yolo11n.launch.py`)<br>`vlm_service_node.py` (`Qwen2-VL` 4-bit 상주)<br>`floor_obstacle_node.py` (OpenCV `/vision/scan`)<br>`gesture_node.py` (`ArUco` + `MediaPipe` ✋/👍) |
-| **Tier&nbsp;3** | **Control Laptop**<br>(Host PC) | `<LAPTOP_IP>`<br>(`<LAPTOP_USER>`) | • 반응형 관제 (`/` 기본 맵, `/dashboard` 대시보드)<br>• WebUI 토크·WP·`dock` 지정·위험구간·제스처 Nav2/순찰 제어 & VLM 채팅<br>• iGPU 저전력 HUD 배터리 모니터링<br>• 상주 웹·Foxglove 데몬 | • Intel i7-12700H + 48GB DDR5<br>• MUX OFF 내장 그래픽(iGPU) 무소음 구동<br>• systemd user 상주 데몬 (`:9999`, `:8765`, `:5555`, `:7777`, `:9418`) | `web_monitor_server.py` (:9999, `/`, `/dashboard`)<br>`foxglove-bridge.service` (:8765 + Lichtblick)<br>`yolo_monitor_viewer.py` (HUD 뷰어)<br>RViz2 3D 디지털 트윈 & Nav2 런처 세트 |
+| **Tier&nbsp;1** | **Raspberry Pi 5**<br>(+ OpenCR 1.0) | `<PI5_IP>`<br>(`<PI_USER>`) | • 물리 센서 I/O · Dual Costmap(`vision_obstacle_layer`) Nav2<br>• `10.5V` 저전압 자동 복귀(`dock`) & `/pi5/system_state` 실측 감시<br>• 부팅 시 모터 폭주 방지(토크 잠금) · `stop.sh` CycloneDDS 비상정지<br>• 무인 자동 기동 (Linger) · `dobingda0.mp3 ➔ dobingda.mp3` 순차 재생 | • Cortex-A76 8GB RAM<br>• 5.2V 5A DC-DC 벅 컨버터 직결<br>• 실시간 `vcgencmd get_throttled` 비트마스크 감시<br>• Distrobox `humble` (ROS 2 / OpenCR / LiDAR / Nav2) | `jta_bringup` (`robot.launch.py`, `nav2.launch.py`, `patrol_node`, `speaker_node`, `pi5_power_node`)<br>`jta_camera` (CSI 카메라 노드)<br>`hlds_laser_publisher` (LiDAR)<br>`turtlebot3_node` (OpenCR `/dev/ttyACM0`)<br>`nav2_bringup` / `slam_toolbox` |
+| **Tier&nbsp;2** | **Jetson Orin Nano** | `<JETSON_IP>:2222`<br>(`<JETSON_USER>`) | • Ampere GPU `yolo11s` 실시간 객체인식(`640`/`0.60`, `yolo11n` 경량 옵션) & `/jetson/system_state`<br>• VLM 4-bit NF4 Pure On-Demand 서비스 (`VRAM 1.42GB`, Lazy JPEG)<br>• 상시 바닥 장애물(`/vision/scan`, `confirm=4f`) & ArUco·한손 제어(`/gesture/cmd`) | • 6-Core A78AE + 1024 CUDA Ampere GPU<br>• 8GB RAM + 16GB NVMe Swap<br>• TUI 모드 (OS 400MB) + Docker (`my_ros2_robot`)<br>• `network-failover.service` (유무선 IP 자동 전환) | `yolo11n` (`yolo11n.launch.py`, 기본 `yolo11s.pt`)<br>`vlm_service_node.py` (`Qwen2-VL` 4-bit Pure On-Demand)<br>`floor_obstacle_node.py` (OpenCV `/vision/scan`)<br>`gesture_node.py` (`ArUco` + `MediaPipe` ✋/👍) |
+| **Tier&nbsp;3** | **Control Laptop**<br>(Host PC) | `<LAPTOP_IP>`<br>(`<LAPTOP_USER>`) | • 반응형 관제 (`/` 기본 맵, `/dashboard` 대시보드, 로컬 `/tailwind.js` 오프라인)<br>• WebUI `/api/estop`·토크·WP·`dock`·위험구간·사람 카운트다운 HUD·실측 텔레메트리·VLM 채팅<br>• iGPU 저전력 HUD 배터리 모니터링<br>• 상주 웹·Foxglove 데몬 | • Intel i7-12700H + 48GB DDR5<br>• MUX OFF 내장 그래픽(iGPU) 무소음 구동<br>• systemd user 상주 데몬 (`:9999`, `:8765`, `:5555`, `:7777`, `:9418`) | `web_monitor_server.py` (:9999, `/`, `/dashboard`, `Condition` MJPEG, SLAM `tf2`)<br>`foxglove-bridge.service` (:8765 + Lichtblick)<br>`yolo_monitor_viewer.py` (HUD 뷰어)<br>RViz2 3D 디지털 트윈 & Nav2 런처 세트 |
 
 * **공통 ROS 2 환경**: ROS 2 Humble Hawksbill (`ROS_DOMAIN_ID=30`)
 * **DDS 네트워크 설정**: Wi-Fi 멀티캐스트 드롭 방지 및 단일 장애점(SPOF) 제거를 위한 **CycloneDDS Unicast Peer** (`RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`, `config/cyclonedds.xml`) 3-Tier 통합 적용
@@ -50,7 +50,7 @@ Pi 5 시스템 데몬(`/etc/systemd/system/jta-web-monitor.service`)과 노트�
 
 | 포트 | 서비스명 | systemd 유닛 / 실행 파일 | 역할 및 접속 주소 |
 | :---: | :---: | :--- | :--- |
-| **`:9999`** | **JTA&nbsp;WebUI** | Pi 5 [`src/pi5/scripts/jta-web-monitor.service`](src/pi5/scripts/jta-web-monitor.service) (`User=<PI_USER>`, `Restart=always`, `RestartSec=5`, `ExecStartPre`/`ExecStopPost` ➔ [`src/pi5/scripts/inner_webui_launch.sh`](src/pi5/scripts/inner_webui_launch.sh) Distrobox `humble` + CycloneDDS ➔ `~/jta_web/web_monitor_server.py`)<br>[`src/laptop/web/web_monitor_server.py`](src/laptop/web/web_monitor_server.py) | • **데스크톱 / 모바일 반응형 관제 (`/` 기본 맵, `/dashboard` 대시보드)**<br>• **원본 JPEG 패스스루(`/video_feed`) + 브라우저 `<canvas>` YOLO·바닥장애물·ArUco/제스처 배지 오버레이(`/api/yolo`)** + VLM 채팅(TTS)<br>• **`WP 이동`/`위험구간` 2-Tab**, 지정순찰(`custom_order`), **`🔌 충전소 지정`(`set_dock`)**, 👍/✋ 비동기 Nav2·자동순찰 제어, PIN 인증 인터락<br>• 3.0초 단절 감시(Watchdog) 및 OpenCR 단절 시 즉시 **`🔴 OpenCR OFF`** 전환<br>• `http://<PI5_IP>:9999` (Pi 5) / `http://<LAPTOP_IP>:9999` (노트북) |
+| **`:9999`** | **JTA&nbsp;WebUI** | Pi 5 [`src/pi5/scripts/jta-web-monitor.service`](src/pi5/scripts/jta-web-monitor.service) (`User=<PI_USER>`, `Restart=always`, `RestartSec=5`, `ExecStartPre`/`ExecStopPost` ➔ [`src/pi5/scripts/inner_webui_launch.sh`](src/pi5/scripts/inner_webui_launch.sh) Distrobox `humble` + CycloneDDS ➔ `~/jta_web/web_monitor_server.py`)<br>[`src/laptop/web/web_monitor_server.py`](src/laptop/web/web_monitor_server.py) | • **데스크톱 / 모바일 반응형 관제 (`/` 기본 맵, `/dashboard` 대시보드, 로컬 `/tailwind.js` 100% 오프라인)**<br>• **`Condition` 이벤트 기반 원본 JPEG 패스스루(`/video_feed`) + 브라우저 `<canvas>` YOLO·바닥장애물·ArUco/제스처·사람 카운트다운 HUD(`3s/30s/50s`) 오버레이(`/api/yolo`)** + VLM 채팅(TTS)<br>• **원자적 비상정지(`POST /api/estop`)**, **`WP 이동`/`위험구간` 2-Tab**, 지정순찰(`custom_order`), **`🔌 충전소 지정`(`set_dock`)**, SLAM `tf2` 폴백, 👍/✋ 비동기 Nav2·자동순찰 제어, PIN 인증 인터락<br>• 3.0초 단절 감시(Watchdog), OpenCR 단절 시 즉시 **`🔴 OpenCR OFF`** 전환 및 실측 Pi 5 `throttled`·Jetson RAM/Swap 텔레메트리<br>• `http://<PI5_IP>:9999` (Pi 5) / `http://<LAPTOP_IP>:9999` (노트북) |
 | **`:5555`** | **Git&nbsp;Web&nbsp;Viewer** | `git-web-viewer.service`<br>`~/.local/bin/git_web_viewer.py` | • Git 커밋 히스토리, 브랜치 트리, 코드 Diff 브라우저 열람<br>• `http://<LAPTOP_IP>:5555` |
 | **`:7777`** | **Markdown&nbsp;Docs&nbsp;Viewer** | `md-viewer.service`<br>`~/.local/bin/md_viewer.py` | • `docs/1_master/`, `docs/2_tiers/`, `docs/3_daily_review/` 마크다운 문서 웹 렌더링<br>• `http://<LAPTOP_IP>:7777` |
 | **`:9418`** | **Git&nbsp;Network&nbsp;Daemon** | `git-daemon.service`<br>`/usr/lib/git-core/git-daemon` | • Pi 5 및 Jetson에서 비밀번호 없이 초고속 `git clone/pull` 지원 |
@@ -81,15 +81,16 @@ Pi 5 시스템 데몬(`/etc/systemd/system/jta-web-monitor.service`)과 노트�
   ```bash
   cd ~/jetson_ros2_humble && ./run.sh
   ```
-* **2) YOLO11n 실시간 추론 노드 실행** (컨테이너 내부):
+* **2) YOLO11 실시간 추론 노드 실행** (컨테이너 내부):
   ```bash
   ros2 launch yolo11n yolo11n.launch.py
-  # ➔ 0.1ms JSON 바운딩박스 토픽(/yolo/detections) 초고속 발행
+  # ➔ 기본 yolo11s.pt (640, conf=0.60) 0.1ms JSON(/yolo/detections) + 2초 주기 /jetson/system_state 발행
+  # ➔ 경량 옵션: model:=/root/ros2_ws/yolo11n.pt imgsz:=480 conf:=0.35
   ```
-* **3) Qwen2-VL 상주 VLM 추론 서비스 실행** (필요 시):
+* **3) Qwen2-VL Pure On-Demand VLM 추론 서비스 실행** (필요 시):
   ```bash
   python3 /root/ros2_ws/src/jetson/vlm_service_node.py
-  # ➔ VRAM 1회 상주(Zero-Wait), 640×480 순수 시각 질의응답·TTS 브리핑 및 CLI(/vlm/chat_query) 지원
+  # ➔ VRAM 1회 상주(1.42GB, background_loop_enabled=False), Lazy JPEG 디코딩, /vlm/trigger & CLI(/vlm/chat_query) 지원
   ```
 
 ---
@@ -153,7 +154,7 @@ Pi 5 시스템 데몬(`/etc/systemd/system/jta-web-monitor.service`)과 노트�
 * **Laziness Protocol**: 불필요한 보일러플레이트를 배제하고 목적에 필요한 가장 정밀한 최소 변경(Minimal Diff)만 적용.
 * **Root-Cause Debugging**: `sleep()`이나 임의 버퍼 증설 등 표면 땜질을 금지하고 [DDS ➔ OS/포트 ➔ QoS ➔ 앱 로직] 순으로 근본 원인을 규명.
 * **Pre-Clean & Safe E-Stop**: 코드 배포 전 잔류 프로세스 선제 격리 및 모터 비상정지 0.0 속도 5회 발행 보장.
-* **로컬 하네스 전체 무결성 검증**:
+* **로컬 하네스 전체 무결성 검증 (`78 PASS / 0 WARN / 0 FAIL`)**:
   ```bash
   python3 scripts/validate_ros2_harness.py
   ```
@@ -163,6 +164,7 @@ Pi 5 시스템 데몬(`/etc/systemd/system/jta-web-monitor.service`)과 노트�
 ## 📚 기술 문서 포털 및 상세 명세서 목록 (`docs/`)
 * 🌟 **[중앙 문서 포털 (Documentation Hub)](docs/INDEX.md)**: 전체 문서 체계 및 바로가기 색인
 * 📖 **[3-Tier 통합 마스터 명세서](docs/1_master/master_specification.md)**: 3-Tier 전체 스펙, 통신 구조, 코드 분석, 트러블슈팅 총망라 (PDF 인쇄 지원)
+* ⚙️ **[3-Tier 실행 프로세스 명세서](docs/1_master/process_specification.md)**: OS·컨테이너·ROS 2 전체 프로세스 카탈로그, 패키지 3종 구조, 파라미터 및 상태 머신 (A4 PDF 인쇄 지원)
 * 🗺️ **[v2.0 고도화 로드맵](docs/1_master/architecture_roadmap_v2.md)**: 전원 분리, Nav2 로컬 폐쇄 루프, 3cm 의자 다리 회피 계획
 * 🍓 **[Raspberry Pi 5 & OpenCR 상세 문서](docs/2_tiers/tier1_raspberry_pi5/)**: 하드웨어/전원, OpenCR 모터 제어, jta_bringup 패키지
 * ⚡ **[Jetson Orin Nano 상세 문서](docs/2_tiers/tier2_jetson_orin_nano/)**: 하드웨어/TUI, YOLO11n ROS 2 패키지, Qwen2-VL VLM 상주 서비스

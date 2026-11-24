@@ -21,7 +21,9 @@
 | `v1.4.7` | 26.11.19 | ROS2_JW | Approved | • Nav2 `behavior_server` 정정·좁은공간 탈출 튜닝(`robot_radius 0.145`), `my_map_261113.pgm` 정리·확장<br>• 최단거리/선택 WP/3초확정 음성·20초 추종(40초 쿨다운, IDLE 포함), WebUI `LOCALIZING`·배지 교정 |
 | `v1.4.8` | 26.11.20 | ROS2_JW | Approved | • WebUI 원본 JPEG 패스스루 + `<canvas>` YOLO 오버레이, `IS_PI5_LOCAL` Pi 5(`:9999`) 이전<br>• 지정순찰(`custom_order`)·부팅 볼륨(`80%→95%`)·`1.7m` 통일 |
 | `v1.4.9` | 26.11.23 | ROS2_JW | Approved | • 상시 바닥장애물(`/vision/scan`), ArUco 카드(`0~10`)+한손(✋/👍) Nav2·자동순찰 제어, `10.5V` 저전압 `dock` 복귀<br>• `OpenCR OFF` UI 교정 및 `1.2m/30s/50s` 통일 |
-| **`v1.4.10`** | 26.11.24 | **ROS2_JW** | **Approved** | • Pi 5·Jetson 실기 스크립트/설정/마스크 1:1 백업 & `launch_yolo11n.sh` 동기화 배포<br>• `speaker_node.py` `~/music/song` 랜덤 부팅곡+인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 |
+| `v1.4.10` | 26.11.24 | ROS2_JW | Approved | • Pi 5·Jetson 실기 스크립트/설정/마스크 1:1 백업 & `launch_yolo11n.sh` 동기화 배포<br>• `speaker_node.py` `~/music/song` 랜덤 부팅곡+인트로 TTS 및 `dobingda.mp3` Edge-TTS 안내 음성 대체 |
+| `v1.4.11` | 26.11.24 | ROS2_JW | Approved | • Nav2 `local_costmap` `vision_obstacle_layer` 분리, `MPPI` `CostCritic: 4.0`/`PathAlign: 9.0`<br>• `floor_obstacle_node` `beam_hold_sec=0.0`·`lateral_padding_m=0.03` 및 `process_specification.md` 신설 |
+| **`v1.4.12`** | 26.11.24 | **ROS2_JW** | **Approved** | • 3-Tier 안전 핫픽스(`stop.sh` CycloneDDS·`patrol_node` 우측 라이다/`goal_seq`/저전압·WebUI `/api/estop`·`run_robot_autostart.sh`)<br>• VLM Pure On-Demand·오프라인 `/tailwind.js`·실측 텔레메트리(`/pi5/system_state`·`/jetson/system_state`)·Nav2 `20Hz`/`base_footprint`·바닥감도(`confirm=4f`, `raytrace 0.0`)·사람 카운트다운 HUD·`dobingda0.mp3 ➔ dobingda.mp3` 순차재생 반영 |
 | `v2.0.0` | (예정) | ROS2_JW | 계획&nbsp;(Planned) | • 3cm 의자 다리 Sim2Real 회피 및 침입자 2.0m 추적 주행 |
 
 ---
@@ -58,13 +60,13 @@ flowchart TB
 
     subgraph Tier2["🟣 Tier 2: 엣지 AI & 자율 브레인 (Jetson Orin Nano @ JETSON_IP)"]
         direction TB
-        T2_YOLO["<b>실시간 비전 & 바닥·제스처</b><br>• YOLO11n (Zero-Lag CUDA) · Qwen2-VL 4-bit (1.42GB)<br>• 상시 바닥장애물(/vision/scan) · ArUco/한손 제어(/gesture/cmd)"]:::t2
+        T2_YOLO["<b>실시간 비전 & 바닥·제스처</b><br>• YOLO11s (Zero-Lag CUDA, /jetson/system_state) · Qwen2-VL 4-bit Pure On-Demand (1.42GB)<br>• 상시 바닥장애물(/vision/scan, confirm=4f) · ArUco/한손 제어(/gesture/cmd)"]:::t2
     end
 
     subgraph Tier3["🔵 Tier 3: 3D 관제 & 웹 허브 (Pi 5 / Control Laptop)"]
         direction TB
         T3_RViz["<b>2D/3D 통합 관제</b><br>• Lichtblick + foxglove_bridge (:8765)<br>• RViz2 & Nav2/SLAM 관제"]:::t3
-        T3_Web["<b>통합 관제 웹 (:9999, Pi 5 IS_PI5_LOCAL)</b><br>• 패스스루 + canvas 오버레이(YOLO/바닥/제스처)<br>• Nav2/SLAM/순찰/dock 지정 & OpenCR OFF Watchdog"]:::t3
+        T3_Web["<b>통합 관제 웹 (:9999, Pi 5 IS_PI5_LOCAL, 오프라인 /tailwind.js)</b><br>• Condition 패스스루 + canvas 오버레이(YOLO/바닥/제스처/카운트다운 HUD)<br>• /api/estop · Nav2/SLAM(tf2)/순찰/dock 지정 · 실측 텔레메트리 & OpenCR OFF Watchdog"]:::t3
     end
 
     %% 고속 분산 통신 (CycloneDDS Unicast DOMAIN=30)
@@ -160,17 +162,19 @@ flowchart TB
   3. 관제 WebUI(:9999) 연동: OpenCR 모터 토크 상태 실시간 구독 및 웹 원터치 락/언락 API (`POST /api/motor/torque`) 제공.
 
 ### 3.5 CSI 카메라 초저지연(Zero-Lag) 파이프라인 (`jta_camera`)
-- **RP1-CFE 직접 제어 및 동적 탐색**: `libcamera` 대신 `media-ctl` + `v4l2-ctl`로 `SBGGR8_1X8` / `BA81` 파이프라인을 직접 구성하며, 재부팅 시 변경되는 `/dev/media*`, `/dev/v4l-subdev*`를 동적 탐색(`get_media_device()`, `get_imx219_subdev()`)합니다.
-- **하드웨어 가속 및 화이트밸런스**: 상하좌우 반전은 V4L2 레지스터(`horizontal_flip`, `vertical_flip`, CPU 부하 0%)로 처리하고, `cv2.LUT` 기반 화이트밸런스를 적용합니다.
+- **RP1-CFE 직접 제어 및 동적 탐색**: `libcamera` 대신 `media-ctl` + `v4l2-ctl`로 `SBGGR8_1X8` / `BA81` 파이프라인을 직접 구성하며, 재부팅 시 변경되는 `/dev/media*`, `/dev/v4l-subdev*` 및 IMX219 엔티티명(`get_imx219_info()`)을 동적 탐색합니다.
+- **하드웨어 가속 및 안정화 (`v1.4.12`)**: 상하좌우 반전은 V4L2 레지스터(`horizontal_flip`, `vertical_flip`, CPU 부하 0%)로 처리하고 `cv2.LUT` 화이트밸런스를 적용합니다. `time.monotonic()` 프레임 페이싱, `rclpy.spin_once(self, timeout_sec=0.0)` 논블로킹 스핀, 종료 시 `proc.wait(timeout=2.0)` + `kill()`로 NTP 시간 점프 및 좀비 프로세스를 차단했습니다.
 - **표준 스트림 계약**: `640x480` 해상도, `15 FPS`, JPEG Quality `90`(`/camera/image_raw/compressed`)으로 송출하며, 비압축 `/camera/image_raw`는 구독자 존재 시에만 On-Demand 발행하여 CPU/열 부하를 억제합니다.
 
-### 3.6 Nav2 자율주행 · 순찰 · 제스처 & `10.5V` 저전압 복귀 (`jta_bringup`, `v1.4.7~v1.4.9`)
-- **Nav2 정밀 튜닝 (`nav2_params.yaml`)**: `MPPIController` (`vx_max: 0.16`, `vx_min: -0.10`, Critics 8종), `behavior_server:`(`base_link`, `simulate_ahead_time: 0.5`), `robot_radius: 0.145`, `inflation_radius: 0.19` 및 `local_costmap` `vision_scan`(`/vision/scan`, `0.20~1.50m`, `raytrace 1.8m`) 바닥장애물 레이어 결합.
-- **자율 순찰·추종 & ArUco 제어 (`patrol_node.py`)**:
+### 3.6 Nav2 자율주행 · 순찰 · 안전 가드레일 & 실측 전원 감시 (`jta_bringup`, `v1.4.7~v1.4.12`)
+- **Nav2 정밀 튜닝 (`nav2_params.yaml`)**: `MPPIController` (`vx_max: 0.16`, `vx_min: -0.10`, Critics 8종, `CostCritic: 4.0`, `PathAlignCritic: 9.0`), `local_costmap` Dual Layer 분리(`obstacle_layer` `/scan` + `vision_obstacle_layer` `/vision/scan` `combination_method: 1`, `obstacle 0.20~1.50m`, `raytrace 0.0~1.8m`, `inflation_radius: 0.25`, `cost_scaling_factor: 7.0`), `waypoint_follower.loop_rate: 20` 및 전 모듈 `robot_base_frame: base_footprint` 통일(Galactic 레거시 키 제거).
+- **자율 순찰·추종 & 안전 상태 머신 (`patrol_node.py`)**:
   - 다중/선택/지정순찰(`custom_order`) 및 `/gesture/cmd` 수신 시 ArUco `ESTOP`(Goal 취소·정지·TTS) 및 `GOTO_WP`(등록 WP 1~10 단일 이동·도착 TTS) 실행.
-  - 사람 근접 `1.2m (bh >= 250px)` `3.0초` 연속 감지 확정 시 `30초` 비주얼 서보잉 추종(종료 후 `"추적을 종료합니다."` TTS, 확정 시점 기준 `50초` 쿨다운).
-  - `/battery_state`가 `9.0V < V <= 10.5V` 구간에서 `5.0초` 연속 지속 시 1회 래치(`low_volt_returning`) 후 `patrol.dock` 좌표로 자율 복귀(`DOCK_RETURN` / `DOCKED` + TTS, `11.5V` 회복 시 래치 해제).
-- **오디오·세레머니 (`speaker_node.py`)**: UACDemoV1.0 (`plug:dmix`) + Edge-TTS(`ko-KR-SunHiNeural`) 기반. 부팅 시 `~/music/song` 내 `.mp3`/`.wav` 무작위 선곡(폴백 없음) ➔ `80%` *"노래 한 곡 듣고 가시죠."* 인트로 TTS + `1.0s` 대기 ➔ 완곡 동기 재생(`"stop"` 스킵) ➔ `95%` *"시스템을 동작합니다."* 발화. 사람 근접 `/play/sound` `dobingda.mp3`는 Edge-TTS 4단 안내 음성으로 대체.
+  - `_scan_cb()`에 `math.atan2(math.sin(angle), math.cos(angle))` 정규화를 적용해 LDS-01 우측 전방(`335~359°`) 사각지대를 해소하고, `goal_seq`/`kind` 추적으로 `DOCK_RETURN`/`GOTO_WP` 경합 및 저전압·단일이동 중 사람 추종 오진입을 차단했습니다.
+  - 사람 근접 `1.2m (bh >= 250px)` `3.0초` 연속 감지 확정 시 `30초` 비주얼 서보잉 추종(종료 시 `"추적을 종료합니다."` TTS + `/play/sound "stop"` 발행, 확정 시점 기준 `50초` 쿨다운).
+  - `/battery_state`가 `9.0V < V <= 10.5V` 구간에서 `5.0초` 연속 지속 시 1회 래치(`low_volt_returning`) 후 `patrol.dock` 좌표로 자율 복귀(`DOCK_RETURN` / `DOCKED` + TTS, `11.5V` 회복 시 래치 해제). `SignalHandlerOptions.NO` + `SIGTERM`/`SIGINT` 핸들러로 종료 시 `stop_robot()` 5회 발행을 보장합니다.
+- **오디오·세레머니 (`speaker_node.py`)**: `amixer -c UACDemoV10`(폴백 `-c 0`) + `plug:dmix` + Edge-TTS(`ko-KR-SunHiNeural`, `8.0s` 타임아웃, 원자적 오디오 프로세스 교체). 부팅 시 `~/music/song` 무작위 선곡 ➔ `80%` *"노래 한 곡 듣고 가시죠."* 인트로 TTS + `1.0s` ➔ 완곡 재생 ➔ `95%` *"시스템을 동작합니다."* 발화. 사람 근접 `dobingda` 요청 시 `dobingda0.mp3`(Edge-TTS 4단 안내) 완곡 후 `dobingda.mp3`를 순차 재생하며 `"stop"` 신호 시 즉시 취소합니다.
+- **실측 전원 감시 & 비상정지 (`pi5_power_node.py`, `stop.sh`, `run_robot_autostart.sh`)**: `pi5_power_node.py`가 `/pi5/system_state`(1Hz JSON)로 `vcgencmd get_throttled` 실측 비트마스크와 한국어 상태를 발행하며(실기 검증에서 `5.18V` 정상 전압 하 `84.0°C` 열 쓰로틀링 `0xe0006` 즉시 포착), `stop.sh`는 CycloneDDS 환경·0.35s 매칭 대기 후 `/motor_power false`·`/patrol/set_enabled false`·Action 취소·`/cmd_vel 0.0` ×5×2를 실행합니다. `run_robot_autostart.sh`는 중복 실행 체크(`pgrep`)를 플래그 삭제·`fuser -k` 이전 최상단으로 배치해 기동 중 충돌을 차단했습니다.
 
 ---
 
@@ -188,17 +192,19 @@ flowchart TB
   - `--net=host`: DDS 브리지 오버헤드 제로화.
   - `-v <JETSON_HOME>/ros2_ws:/root/ros2_ws`: 실시간 워크스페이스 마운트.
 
-### 4.2 자율 회피 노드 (`avoid.py`) & 정식 YOLO11n 패키지 (`yolo11n`)
-- **Zero-Lag 프레임 스킵 큐잉 (`src/jetson/yolo11n/yolo11n/detector_node.py`)**: 이전 프레임 추론 중 신규 프레임 수신 시 `self.processing` 가드로 즉시 드롭해 지연 누적을 차단 (`depth=1`, CUDA:0 자동 폴백).
-- **경량 JSON 발행**: 기본 `publish_annotated=False`로 영상 재인코딩을 생략하고 `/yolo/detections` (0.1ms JSON)만 발행.
+### 4.2 정식 YOLO11 패키지 (`yolo11n`) & 시스템 텔레메트리
+- **Zero-Lag 프레임 스킵 & 실기 표준 (`src/jetson/yolo11n/yolo11n/detector_node.py`, `yolo11n.launch.py`)**: 이전 프레임 추론 중 신규 프레임 수신 시 `self.processing` 가드로 즉시 드롭(`depth=1`, CUDA:0). 실기 표준 기본값은 **`/root/ros2_ws/yolo11s.pt`, `imgsz=640`, `conf=0.60`**으로 통일했으며, 런치 인자로 경량 `yolo11n.pt`/`480` 전환이 가능합니다.
+- **경량 JSON & 2초 주기 `/jetson/system_state`**: 기본 `publish_annotated=False`로 `/yolo/detections`(0.1ms JSON)만 발행하며, `/proc/meminfo` + thermal zone을 읽어 RAM/Swap/온도를 `/jetson/system_state` JSON으로 발행합니다(실측 `4.6/7.3 GB`, Swap `25 MB/16.0 GB`, `67.9°C`).
 
-### 4.3 온디바이스 VLM 상주 서비스 (`vlm_service_node.py`)
-- **`Qwen2-VL-2B-Instruct` 4-bit NF4 상주**: VRAM **`1.42GB`**로 압축 상주(FP16 `5.0GB` 대비 `3.58GB` 회수).
-- **이원화 아키텍처**: YOLO `1.2m(h >= 250px)` 3초 확정 시 `dobingda.mp3`(Edge-TTS 안내 음성) 재생(50초 쿨다운), 수동 `/vlm/trigger` 질의 시 `640×480` 원본·`max_new_tokens=40`·`allow_person_alert=False` 순수 시각 우선 브리핑(`/vlm/response`), CLI 전용 `/vlm/chat_query` ↔ `/vlm/chat_response` 분리.
+### 4.3 온디바이스 VLM Pure On-Demand 서비스 (`vlm_service_node.py`, `v1.4.12`)
+- **`Qwen2-VL-2B-Instruct` 4-bit NF4 Pure On-Demand 상주**: VRAM **`1.42GB`** 상주 상태를 유지하되 `background_loop_enabled=False`로 25초 주기 GPU 공회전을 제거해 대기 발열과 GPU 경합을 없앴습니다.
+- **Lazy JPEG 디코딩 & 비차단 락**: `camera_callback`은 원시 JPEG 바이트만 저장하고 실제 추론 시에만 `frame_lock` 밖에서 1회 디코딩하며, 비차단 `inference_lock`으로 중복 요청을 즉시 드롭합니다.
+- **이원화 아키텍처**: YOLO `person` (`conf >= 0.50`, `h >= 250px`, `time.monotonic()`) 3초 확정 시 `dobingda`(`dobingda0.mp3 ➔ dobingda.mp3`) 재생(50초 쿨다운), 수동 `/vlm/trigger` 시 `640×480`·`max_new_tokens=40`·`allow_person_alert=False` 순수 시각 우선 브리핑(`/vlm/response`), CLI 전용 `/vlm/chat_query` ↔ `/vlm/chat_response` 분리.
 
-### 4.4 상시 바닥 장애물 & ArUco·한손 제어 (`floor_obstacle_node.py`, `gesture_node.py`, `v1.4.9`)
-- **전 구간 상시 바닥 장애물 (`floor_obstacle_node.py`)**: `/yolo/zone_enable`과 무관하게 OpenCV LAB 색차(`chroma_thresh=12.0`) + 명도·에지(`luma_thresh=28.0`, `min_area_px=335`, `roi_top_ratio=0.58`) + YOLO 하단 좌표 보너스를 결합해 2프레임 확정·`0.8s` 잔상 유지 후 전방 `±33°` 67빔 `LaserScan`(`/vision/scan`, `BEST_EFFORT`) 및 `/vision/floor_obstacles` JSON 발행.
-- **ArUco 숫자 카드 + 한 손 Nav2 제어 (`gesture_node.py`)**: `DICT_4X4_50` ArUco 카드(`ID 0=ESTOP 0.25s`, `ID 1~10=GOTO_WP 0.8s`, A4 11장 [`docs/aruco_wp_cards.pdf`](../aruco_wp_cards.pdf))와 `MediaPipe Hands`(`model_complexity=1`, `mp_frame_stride=2`) 한 손 펼침(`✋`, `1.5s` ➔ `NAV2_STOP`) / 엄지척(`👍`, `2.0s` ➔ `NAV2_START`)을 `/gesture/cmd`·`/gesture/state`로 발행.
+### 4.4 상시 바닥 장애물 · 제스처 & 네트워크 페일오버 (`floor_obstacle_node.py`, `gesture_node.py`, `network_failover.py`, `v1.4.12`)
+- **전 구간 상시 바닥 장애물 (`floor_obstacle_node.py`)**: `/yolo/zone_enable`과 무관하게 OpenCV LAB 색차(`chroma_thresh=18.0`) + 명도·에지(`luma_thresh=38.0`, `min_area_px=650`, `roi_top_ratio=0.58`, 밝은 바닥 반사광 억제 `dL_signed > luma_thresh * 1.7`) + YOLO 하단 좌표 보너스를 결합해 4프레임 연속 확정(`confirm_frames=4`)·`beam_hold_sec=0.0`·`lateral_padding_m=0.03`으로 전방 `±33°` 67빔 `LaserScan`(`/vision/scan`, `BEST_EFFORT`) 및 `/vision/floor_obstacles` JSON을 발행합니다.
+- **ArUco 숫자 카드 + 한 손 Nav2 제어 (`gesture_node.py`)**: `DICT_4X4_50` ArUco 카드(`ID 0=ESTOP 0.25s`, `ID 1~10=GOTO_WP 0.8s`, A4 11장 [`docs/aruco_wp_cards.pdf`](../aruco_wp_cards.pdf))와 `MediaPipe Hands`(`model_complexity=1`, `mp_frame_stride=2`, 손가락 굽힘 히스테리시스 `>1.15` 펼침 / `<=1.05` 굽힘) 한 손 펼침(`✋`, `1.5s` ➔ `NAV2_STOP`) / 엄지척(`👍`, `2.0s` ➔ `NAV2_START`)을 `/gesture/cmd`·`/gesture/state`로 발행합니다.
+- **유무선 IP 자동 전환 (`network_failover.py`)**: Wi-Fi 페일오버 시 유선 인터페이스(`enP8p1s0`)의 잔류 `<JETSON_IP>/24` 주소를 삭제하고 `time.monotonic()` 디바운스·정확한 프리픽스 검사(`f"{ip}/"`)로 라우팅 충돌을 방지합니다.
 
 ---
 
@@ -224,7 +230,7 @@ flowchart TB
 - Jetson의 `/yolo/detections` 토픽을 실시간 수신하여 자연어 명령(*"책상 위 컵 찾아가기"*)을 로봇 Nav2 주행 목표 좌표로 변환하는 상위 플래너 확장 준비 완료.
 
 ### 5.5 호스트 · Pi 5 상주 웹 서비스 및 관제 인프라
-- **JTA WebUI (`:9999`, `jta-web-monitor.service`)**: `/etc/systemd/system/jta-web-monitor.service` (레포 백업: `src/pi5/scripts/jta-web-monitor.service`, `User=<PI_USER>`, `Restart=always`, `RestartSec=5`, `ExecStartPre`/`ExecStopPost` 포트 정리 ➔ `src/pi5/scripts/inner_webui_launch.sh` Distrobox `humble` CycloneDDS·ROS 2 로드 ➔ `~/jta_web/web_monitor_server.py`) 기반 **Pi 5(`http://<PI5_IP>:9999`) 단독 상시 호스팅** (노트북 서비스 선택 구동). 원본 JPEG 패스스루(`/video_feed`) + 브라우저 `<canvas>`(`yolo_overlay.js`: YOLO + 바닥장애물 + 제스처 배지), `/` 실시간 2D 맵(`WP`/`위험구간` 2-Tab, `custom_order`, `🔌 충전소 지정`), `/dashboard` 3단 VLM 채팅(TTS), 👍 Nav2+자동순찰 / ✋ Nav2 종료 비동기 제어, `3.0초` 단절 감시(OpenCR `NO_CONNECT` 시 즉시 `🔴 OpenCR OFF` 초기화).
+- **JTA WebUI (`:9999`, `jta-web-monitor.service`, `v1.4.12`)**: `/etc/systemd/system/jta-web-monitor.service` (레포 백업: `src/pi5/scripts/jta-web-monitor.service`, `User=<PI_USER>`, `Restart=always`, `RestartSec=5`, `ExecStartPre`/`ExecStopPost` 포트 정리 ➔ `src/pi5/scripts/inner_webui_launch.sh` Distrobox `humble` CycloneDDS·ROS 2 로드 ➔ `~/jta_web/web_monitor_server.py`) 기반 **Pi 5(`http://<PI5_IP>:9999`) 단독 상시 호스팅**(`IS_WEB_MASTER` 게이트로 노트북 WebUI와 제스처 중복 충돌 방지). 로컬 `/tailwind.js`(398KB) 100% 오프라인 동작, `threading.Condition` 이벤트 기반 원본 JPEG 패스스루(`/video_feed`) + 브라우저 `<canvas>`(`yolo_overlay.js`: YOLO + 바닥장애물 + 제스처 배지 + 사람 감지 카운트다운 HUD `3s/30s/50s`), `POST /api/estop` 원자적 비상정지, `mtime` 캐싱, SLAM `tf2_ros` 폴백, Keepout 선분 폭 `0.15m` 정합, `turn_seq` 경합 방지, `/` 실시간 2D 맵(`WP`/`위험구간` 2-Tab, `custom_order`, `🔌 충전소 지정`), `/dashboard` 3단 VLM 채팅(TTS), 👍/✋ 비동기 제어, `3.0초` 단절 감시(`🔴 OpenCR OFF`) 및 실측 `/pi5/system_state`·`/jetson/system_state` 텔레메트리 표출.
 - **노트북 호스트 상주 인프라 (`systemd --user`, `Linger=yes`)**:
   1. **Lichtblick + `foxglove_bridge` (`:8765`, `foxglove-bridge.service`)**: 2D/3D Nav2·SLAM 전용 관제(`config/lichtblick_nav2_slam.json`).
   2. **Git Web Viewer (`:5555`)** & **Markdown Docs Viewer (`:7777`)** & **Git Network Daemon (`:9418`)**.
@@ -266,7 +272,7 @@ bash scripts/sync_to_robot.sh all
 
 # 7. 차세대 자율 순찰 & 멀티모달 음성·비전 로드맵 (v2.0 Target Architecture)
 
-> **📌 아키텍처 구분**: 1~6장은 현재 구현 완료되어 동작 중인 베이스라인(`v1.4.9`) 명세이며, 본 7장은 **차기 단계로 확정된 24시간 독립 자율 순찰·트래픽 다이어트·양방향 음성 AI 통합 미래 계획(To-Be Roadmap)**입니다.
+> **📌 아키텍처 구분**: 1~6장은 현재 구현 완료되어 동작 중인 베이스라인(`v1.4.12`) 명세이며, 본 7장은 **차기 단계로 확정된 24시간 독립 자율 순찰·트래픽 다이어트·양방향 음성 AI 통합 미래 계획(To-Be Roadmap)**입니다.
 
 ```mermaid
 flowchart LR

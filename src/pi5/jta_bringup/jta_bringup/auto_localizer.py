@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """AMCL 전역 초기 위치 자동 추정(Global Localization) 보조 노드."""
 
+import signal
 import time
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+try:
+    from rclpy.signals import SignalHandlerOptions
+except ImportError:
+    SignalHandlerOptions = None
 from std_srvs.srv import Empty
 from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
 
@@ -34,6 +39,7 @@ class AutoLocalizerNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.latest_cov = None
+        self._stop_requested = False
         self.create_subscription(
             PoseWithCovarianceStamped,
             '/amcl_pose',
@@ -58,14 +64,16 @@ class AutoLocalizerNode(Node):
 
     def run(self):
         self.get_logger().info('Waiting for /reinitialize_global_localization service...')
-        while rclpy.ok() and not self.glob_client.wait_for_service(timeout_sec=1.0):
+        while rclpy.ok() and not self._stop_requested and not self.glob_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Still waiting for AMCL global localization service...')
 
-        if not rclpy.ok():
+        if not rclpy.ok() or self._stop_requested:
             return
 
         # AMCL lifecycle active 안정화를 위해 짧게 대기 후 전역 초기화 호출
         time.sleep(1.5)
+        if self._stop_requested:
+            return
         future = self.glob_client.call_async(Empty.Request())
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         self.get_logger().info('Global localization initialized (uniform particles spread).')
@@ -73,28 +81,29 @@ class AutoLocalizerNode(Node):
         # 회전 전 초기 라이다 스캔으로 1차 파티클 필터링 수행
         if self.nomotion_client.wait_for_service(timeout_sec=2.0):
             for _ in range(3):
-                if not rclpy.ok():
+                if not rclpy.ok() or self._stop_requested:
                     break
                 nm_future = self.nomotion_client.call_async(Empty.Request())
                 rclpy.spin_until_future_complete(self, nm_future, timeout_sec=2.0)
                 time.sleep(0.35)
             self.get_logger().info('Pre-spin nomotion updates (x3) completed.')
 
-        if not self.enable_spin:
-            self.get_logger().info(
-                'auto_spin=False: 제자리 회전 없이 대기합니다. (전원선 분리 후 auto_spin:=true 사용)'
-            )
+        if not self.enable_spin or self._stop_requested:
+            if not self.enable_spin:
+                self.get_logger().info(
+                    'auto_spin=False: 제자리 회전 없이 대기합니다. (전원선 분리 후 auto_spin:=true 사용)'
+                )
             return
 
         self.get_logger().info(
             f'auto_spin=True: 제자리 회전으로 AMCL 수렴 시작 (최대 {self.max_spin_sec:.1f}s)...'
         )
-        start_t = time.time()
+        start_t = time.monotonic()
         twist = Twist()
         twist.angular.z = self.angular_speed
 
         try:
-            while rclpy.ok() and (time.time() - start_t) < self.max_spin_sec:
+            while rclpy.ok() and not self._stop_requested and (time.monotonic() - start_t) < self.max_spin_sec:
                 self.cmd_pub.publish(twist)
                 rclpy.spin_once(self, timeout_sec=0.1)
                 if self.latest_cov is not None and self.latest_cov <= self.cov_threshold:
@@ -108,10 +117,23 @@ class AutoLocalizerNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    if SignalHandlerOptions is not None:
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    else:
+        rclpy.init(args=args)
     node = AutoLocalizerNode()
+
+    if SignalHandlerOptions is not None:
+        def _on_signal(signum, _frame):
+            node._stop_requested = True
+
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+
     try:
         node.run()
+    except KeyboardInterrupt:
+        pass
     finally:
         node.stop_robot()
         node.destroy_node()

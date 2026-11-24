@@ -30,15 +30,21 @@ def get_media_device():
     return '/dev/media0'
 
 
-def get_imx219_subdev():
+def get_imx219_info():
     for dev in sorted(glob.glob('/sys/class/video4linux/v4l-subdev*')):
         try:
             with open(f"{dev}/name", "r") as f:
-                if "imx219" in f.read():
-                    return f"/dev/{os.path.basename(dev)}"
+                name = f.read().strip()
+                if "imx219" in name:
+                    return f"/dev/{os.path.basename(dev)}", name
         except Exception:
             pass
-    return '/dev/v4l-subdev2'
+    return '/dev/v4l-subdev2', 'imx219 10-0010'
+
+
+def get_imx219_subdev():
+    subdev, _ = get_imx219_info()
+    return subdev
 
 
 class LowLatencyCameraNode(Node):
@@ -70,7 +76,7 @@ class LowLatencyCameraNode(Node):
         subprocess.run(['pkill', '-9', '-f', 'v4l2-ctl.*video0'], check=False, stderr=subprocess.DEVNULL)
 
         media_dev = get_media_device()
-        subdev = get_imx219_subdev()
+        subdev, imx219_entity = get_imx219_info()
 
         # 1. 하드웨어 회전 및 노출/게인 설정
         hw_ctrl_cmds = [
@@ -84,7 +90,7 @@ class LowLatencyCameraNode(Node):
         pipe_cmds = [
             ['media-ctl', '-d', media_dev, '-r'],
             ['media-ctl', '-d', media_dev, '-l', '"csi2":4 -> "rp1-cfe-csi2_ch0":0 [1]'],
-            ['media-ctl', '-d', media_dev, '-V', f'"imx219 10-0010":0 [fmt:SBGGR8_1X8/{SENSOR_W}x{SENSOR_H} field:none]'],
+            ['media-ctl', '-d', media_dev, '-V', f'"{imx219_entity}":0 [fmt:SBGGR8_1X8/{SENSOR_W}x{SENSOR_H} field:none]'],
             ['media-ctl', '-d', media_dev, '-V', f'"csi2":0 [fmt:SBGGR8_1X8/{SENSOR_W}x{SENSOR_H} field:none]'],
             ['media-ctl', '-d', media_dev, '-V', f'"csi2":4 [fmt:SBGGR8_1X8/{SENSOR_W}x{SENSOR_H} field:none]'],
             ['v4l2-ctl', '-d', '/dev/video0', f'--set-fmt-video=width={SENSOR_W},height={SENSOR_H},pixelformat=BA81'],
@@ -153,7 +159,11 @@ class LowLatencyCameraNode(Node):
                 if len(raw_bytes) < frame_bytes:
                     break
 
-                now_sec = time.time()
+                # ros2 param get/list 서비스 콜백 응답 유지 (비차단)
+                rclpy.spin_once(self, timeout_sec=0.0)
+
+                # NTP 시계 역행 시 프리징 방지를 위해 단조 시계(monotonic) 사용
+                now_sec = time.monotonic()
                 # 타겟 FPS 주기가 도래하지 않았으면 가벼운 프레임 드롭 (파이프 버퍼링 지연 방지 & CPU 쿨링)
                 if (now_sec - last_pub_sec) < (min_interval * 0.90):
                     continue
@@ -187,7 +197,10 @@ class LowLatencyCameraNode(Node):
                 self.get_logger().error(f"Stream error: {e}")
         finally:
             proc.terminate()
-            proc.wait()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def main(args=None):

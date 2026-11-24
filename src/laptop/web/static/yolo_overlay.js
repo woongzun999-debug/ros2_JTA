@@ -331,6 +331,62 @@
           ctx.fillText(badgeText, bx + padX, by + padY);
         }
       }
+
+      // 5) 근접 사람 감지 카운트다운 / 추종 / 쿨다운 HUD 배지 (상단 중앙)
+      const pc = latestData.person_countdown;
+      if (pc && pc.state && pc.state !== 'IDLE') {
+        const rem = Math.max(0, Number(pc.remaining_sec) || 0);
+        const total = Math.max(0.1, Number(pc.total_sec) || 3.0);
+        let pText = '';
+        let pBg = 'rgba(15, 23, 42, 0.85)';
+        let pBorder = '#f59e0b';
+        let pProgress = 0;
+
+        if (pc.state === 'DETECTING') {
+          pText = `👤 사람 감지 ${rem.toFixed(1)}s`;
+          pBg = 'rgba(180, 83, 9, 0.90)';
+          pBorder = '#fbbf24';
+          pProgress = Math.max(0, Math.min(1, (total - rem) / total));
+        } else if (pc.state === 'FOLLOWING') {
+          pText = `🏃 사람 추종 ${Math.ceil(rem)}s`;
+          pBg = 'rgba(4, 120, 87, 0.90)';
+          pBorder = '#34d399';
+          pProgress = Math.max(0, Math.min(1, rem / total));
+        } else if (pc.state === 'COOLDOWN') {
+          pText = `⏳ 재감지 대기 ${Math.ceil(rem)}s`;
+          pBg = 'rgba(30, 41, 59, 0.82)';
+          pBorder = '#94a3b8';
+          pProgress = Math.max(0, Math.min(1, rem / total));
+        }
+
+        if (pText) {
+          const pFont = isCompact ? 10 : 12;
+          ctx.save();
+          ctx.font = `bold ${pFont}px ui-sans-serif, system-ui, -apple-system, sans-serif`;
+          const padX = isCompact ? 6 : 10;
+          const padY = isCompact ? 4 : 5;
+          const tw = ctx.measureText(pText).width;
+          const bw = tw + padX * 2;
+          const bh = pFont + padY * 2 + 4;
+          const bx = Math.max(draw.x + 6, draw.x + (draw.w - bw) * 0.5);
+          const by = draw.y + 8;
+
+          ctx.fillStyle = pBg;
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.strokeStyle = pBorder;
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(bx, by, bw, bh);
+
+          if (pProgress > 0) {
+            ctx.fillStyle = pBorder;
+            ctx.fillRect(bx, by + bh - 3, bw * pProgress, 3);
+          }
+
+          ctx.fillStyle = '#f8fafc';
+          ctx.fillText(pText, bx + padX, by + padY);
+          ctx.restore();
+        }
+      }
     }
 
     async function pollOnce() {

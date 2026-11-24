@@ -68,23 +68,35 @@ sync_pi5() {
         "${REPO_ROOT}/src/pi5/camera_ros2_stream_optimized.py" \
         "${REPO_ROOT}/src/pi5/obstacle_avoidance.py" \
         "${REPO_ROOT}/src/pi5/utils/check_power.py" \
+        "${REPO_ROOT}/src/pi5/utils/pi5_power_daemon.py" \
         "${REPO_ROOT}/src/pi5/utils/stop.sh" \
+        "${REPO_ROOT}/src/pi5/scripts/run_robot_autostart.sh" \
+        "${REPO_ROOT}/src/pi5/scripts/inner_robot_launch.sh" \
+        "${REPO_ROOT}/src/pi5/scripts/inner_nav2_launch.sh" \
+        "${REPO_ROOT}/src/pi5/scripts/inner_slam_launch.sh" \
+        "${REPO_ROOT}/src/pi5/scripts/inner_webui_launch.sh" \
         "${REPO_ROOT}/config/cyclonedds.xml" \
         "${rpi_host}:~/"
 
-    # jta_bringup speaker_node.py, nav2_params.yaml, nav2.launch.py, blank_filter_mask.* 동기화 (src 및 install 동시 반영)
+    # jta_bringup 노드·설정·런치 전체 동기화 (src 및 install 동시 반영)
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/speaker_node.py" \
         "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/patrol_node.py" \
+        "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/auto_localizer.py" \
+        "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/pi5_power_node.py" \
         "${rpi_host}:~/ros2_ws/src/jta_bringup/jta_bringup/"
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/speaker_node.py" \
         "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/patrol_node.py" \
+        "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/auto_localizer.py" \
+        "${REPO_ROOT}/src/pi5/jta_bringup/jta_bringup/pi5_power_node.py" \
         "${rpi_host}:~/ros2_ws/install/jta_bringup/lib/python3.10/site-packages/jta_bringup/"
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/pi5/jta_bringup/config/nav2_params.yaml" \
         "${REPO_ROOT}/src/pi5/jta_bringup/config/blank_filter_mask.yaml" \
         "${REPO_ROOT}/src/pi5/jta_bringup/config/blank_filter_mask.pgm" \
+        "${REPO_ROOT}/src/pi5/jta_bringup/config/detection_zones.json" \
+        "${REPO_ROOT}/src/pi5/jta_bringup/config/hazard_zones.json" \
         "${rpi_host}:~/ros2_ws/src/jta_bringup/config/"
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/pi5/jta_bringup/config/nav2_params.yaml" \
@@ -93,12 +105,28 @@ sync_pi5() {
         "${rpi_host}:~/ros2_ws/install/jta_bringup/share/jta_bringup/config/"
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/pi5/jta_bringup/launch/nav2.launch.py" \
-        "${rpi_host}:~/ros2_ws/src/jta_bringup/launch/nav2.launch.py"
+        "${REPO_ROOT}/src/pi5/jta_bringup/launch/robot.launch.py" \
+        "${rpi_host}:~/ros2_ws/src/jta_bringup/launch/"
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/pi5/jta_bringup/launch/nav2.launch.py" \
-        "${rpi_host}:~/ros2_ws/install/jta_bringup/share/jta_bringup/launch/nav2.launch.py"
+        "${REPO_ROOT}/src/pi5/jta_bringup/launch/robot.launch.py" \
+        "${rpi_host}:~/ros2_ws/install/jta_bringup/share/jta_bringup/launch/"
 
-    # Pi 5 상시 WebUI (:9999, ~/jta_web/) 서버 및 <canvas> 정적 오버레이 동기화
+    # jta_camera 노드·런치 동기화 (src 및 install 동시 반영)
+    rsync ${RSYNC_FLAGS} \
+        "${REPO_ROOT}/src/pi5/jta_camera/jta_camera/camera_node.py" \
+        "${rpi_host}:~/ros2_ws/src/jta_camera/jta_camera/"
+    rsync ${RSYNC_FLAGS} \
+        "${REPO_ROOT}/src/pi5/jta_camera/jta_camera/camera_node.py" \
+        "${rpi_host}:~/ros2_ws/install/jta_camera/lib/python3.10/site-packages/jta_camera/"
+    rsync ${RSYNC_FLAGS} \
+        "${REPO_ROOT}/src/pi5/jta_camera/launch/camera.launch.py" \
+        "${rpi_host}:~/ros2_ws/src/jta_camera/launch/"
+    rsync ${RSYNC_FLAGS} \
+        "${REPO_ROOT}/src/pi5/jta_camera/launch/camera.launch.py" \
+        "${rpi_host}:~/ros2_ws/install/jta_camera/share/jta_camera/launch/"
+
+    # Pi 5 상시 WebUI (:9999, ~/jta_web/) 서버 및 <canvas>·오프라인 Tailwind 정적 자산 동기화
     rsync ${RSYNC_FLAGS} \
         "${REPO_ROOT}/src/laptop/web/web_monitor_server.py" \
         "${rpi_host}:~/jta_web/"
@@ -106,6 +134,7 @@ sync_pi5() {
         "${REPO_ROOT}/src/laptop/web/static/index.html" \
         "${REPO_ROOT}/src/laptop/web/static/map.html" \
         "${REPO_ROOT}/src/laptop/web/static/yolo_overlay.js" \
+        "${REPO_ROOT}/src/laptop/web/static/tailwind.js" \
         "${rpi_host}:~/jta_web/static/"
 
     echo -e "  ${GREEN}[완료]${RESET} Tier 1 (RPi5) 동기화 완료."
@@ -134,6 +163,15 @@ sync_jetson() {
         "${REPO_ROOT}/src/jetson/yolo11n/yolo11n/detector_node.py" \
         "${jetson_host}:~/ros2_ws/src/yolo11n/yolo11n/detector_node.py"
     rsync ${RSYNC_FLAGS} -e "ssh -p ${jetson_port}" \
+        "${REPO_ROOT}/src/jetson/yolo11n/launch/yolo11n.launch.py" \
+        "${jetson_host}:~/ros2_ws/src/yolo11n/launch/yolo11n.launch.py"
+    if [[ "$DRY_RUN" == false ]]; then
+        # Jetson install/은 Docker root 소유이므로 컨테이너 내부에서 src -> install 반영
+        ssh -p "${jetson_port}" "${jetson_host}" \
+            "docker exec ros2_humble_dev bash -c 'cp -f /root/ros2_ws/src/yolo11n/yolo11n/detector_node.py /root/ros2_ws/install/yolo11n/lib/python3.10/site-packages/yolo11n/detector_node.py && cp -f /root/ros2_ws/src/yolo11n/launch/yolo11n.launch.py /root/ros2_ws/install/yolo11n/share/yolo11n/launch/yolo11n.launch.py && rm -rf /root/ros2_ws/install/yolo11n/lib/python3.10/site-packages/yolo11n/__pycache__'" \
+            || echo -e "  ${YELLOW}[WARN]${RESET} Jetson Docker install/ 반영 스킵 (컨테이너 미실행)"
+    fi
+    rsync ${RSYNC_FLAGS} -e "ssh -p ${jetson_port}" \
         "${REPO_ROOT}/src/jetson/jetson_yolo_node.py" \
         "${REPO_ROOT}/src/jetson/vlm_service_node.py" \
         "${REPO_ROOT}/src/jetson/gesture_node.py" \
@@ -141,10 +179,15 @@ sync_jetson() {
         "${jetson_host}:~/ros2_JTA/src/jetson/"
     rsync ${RSYNC_FLAGS} -e "ssh -p ${jetson_port}" \
         "${REPO_ROOT}/src/jetson/scripts/launch_yolo11n.sh" \
+        "${REPO_ROOT}/src/jetson/scripts/network_failover.py" \
         "${jetson_host}:~/ros2_JTA/src/jetson/scripts/"
     rsync ${RSYNC_FLAGS} -e "ssh -p ${jetson_port}" \
         "${REPO_ROOT}/src/jetson/yolo11n/yolo11n/detector_node.py" \
         "${jetson_host}:~/ros2_JTA/src/jetson/yolo11n/yolo11n/detector_node.py"
+    ssh -p "${jetson_port}" "${jetson_host}" "mkdir -p ~/ros2_JTA/src/jetson/yolo11n/launch ~/ros2_JTA/src/jetson/scripts" >/dev/null 2>&1 || true
+    rsync ${RSYNC_FLAGS} -e "ssh -p ${jetson_port}" \
+        "${REPO_ROOT}/src/jetson/yolo11n/launch/yolo11n.launch.py" \
+        "${jetson_host}:~/ros2_JTA/src/jetson/yolo11n/launch/yolo11n.launch.py"
     echo -e "  ${GREEN}[완료]${RESET} Tier 2 (Jetson) 동기화 완료."
 }
 

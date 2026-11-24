@@ -16,7 +16,9 @@
 | `v1.4.7` | 26.11.19 | ROS2_JW | Approved | • `vlm_service_node.py` 사람 근접 음성 트리거 거리 `2.0m`(`h >= 150px`) 확장<br>• `3초` 연속 감지 확정 시 즉시 `dobingda.mp3` 재생(추종 동시 시작) 및 확정 시점 기준 `40초` 쿨다운 반영 |
 | `v1.4.8` | 26.11.20 | ROS2_JW | Approved | • `vlm_service_node.py` 사람 근접 음성 트리거 기준을 `1.7m`(`h >= 176px`)로 통일 반영 |
 | `v1.4.9` | 26.11.23 | ROS2_JW | Approved | • `vlm_service_node.py` 사람 근접 트리거 `1.2m(h >= 250px)` · `50초` 쿨다운 통일<br>• 상시 바닥장애물(`floor_obstacle_node.py` `/vision/scan`) 및 ArUco+한손 제어(`gesture_node.py` `/gesture/cmd`) 추가 |
-| **`v1.4.10`** | 26.11.24 | **ROS2_JW** | **Approved** | • `vlm_service_node.py` 코드 변경 없이 Pi 5 `dobingda.mp3` Edge-TTS 4단 안내 음성 대체 연동 반영 |
+| `v1.4.10` | 26.11.24 | ROS2_JW | Approved | • `vlm_service_node.py` 코드 변경 없이 Pi 5 `dobingda.mp3` Edge-TTS 4단 안내 음성 대체 연동 반영 |
+| `v1.4.11` | 26.11.24 | ROS2_JW | Approved | • `floor_obstacle_node.py` `beam_hold_sec=0.0`(회전 잔상 제거, Nav2 `vision_obstacle_layer` 위임) 및 `lateral_padding_m=0.03` 반영 |
+| **`v1.4.12`** | 26.11.24 | **ROS2_JW** | **Approved** | • `vlm_service_node.py` Pure On-Demand(`background_loop_enabled=False`)·Lazy JPEG 디코딩·비차단 락·`conf>=0.50`·`monotonic()`·미사용 `/tts/say` 제거<br>• `floor_obstacle_node.py` 감도 완화(`18.0/38.0/650px/confirm=4`, 반사광 억제), `gesture_node.py` 손가락 굽힘 데드밴드 교정(`<=1.05`) 반영 |
 
 ---
 
@@ -230,21 +232,23 @@ def image_callback(self, msg: Image):
 
 ---
 
-### 4) 🧠 온디바이스 VLM 상주 추론 노드 (`vlm_service_node.py`)
+### 4) 🧠 온디바이스 VLM Pure On-Demand 추론 노드 (`vlm_service_node.py`, `v1.4.12`)
 - **모델**: `Qwen2-VL-2B-Instruct` (`BitsAndBytes` 4-bit NF4 양자화, VRAM `1.42GB` 1회 상주)
-- **구독(Sub)**: `/camera/image_raw/compressed`, `/yolo/detections`, `/scan` (`BEST_EFFORT`), `/vlm/trigger`, `/vlm/chat_query`, `/tts/say`
+- **구독(Sub)**: `/camera/image_raw/compressed`, `/yolo/detections`, `/scan` (`BEST_EFFORT`), `/vlm/trigger`, `/vlm/chat_query`, `/yolo/zone_enable` (미사용 `/tts/say` 구독 제거)
 - **발행(Pub)**: `/vlm/response` (TTS 브리핑), `/vlm/chat_response` (CLI 조용한 응답), `/vlm/latest_summary`, `/play/sound`
-- **이벤트 우선 & 순수 시각 우선 아키텍처 (`v1.4.6 ~ v1.4.9`)**:
+- **Pure On-Demand & Lazy JPEG 디코딩 아키텍처 (`v1.4.6 ~ v1.4.12`)**:
+  - **Pure On-Demand 모드**: `background_loop_enabled=False`로 25초 주기 배경 GPU 공회전을 제거해 대기 발열과 YOLO GPU 경합을 없애면서도, 모델 가중치는 VRAM(`1.42GB`)에 상주시켜 수동 질의 시 즉시 추론합니다.
+  - **Lazy JPEG 디코딩 & 비차단 락**: `camera_callback`은 매 프레임 JPEG 디코딩을 수행하지 않고 원시 바이트만 저장하며, 실제 추론 요청 시에만 `frame_lock` 밖에서 1회 디코딩합니다. 비차단 `inference_lock`으로 추론 중 중복 요청을 즉시 드롭합니다.
   - **입력/토큰 규격**: `_execute_vlm_inference()`에서 `640×480` 원본 해상도와 `max_new_tokens=40`을 사용하며, 수동 `/vlm/trigger` 질의 시 `allow_person_alert=False`로 순수 시각 우선 브리핑을 수행합니다.
-  - **사람 근접 경보 분리**: `yolo_callback`에서 사람 바운딩박스 세로 `h >= 250px` (약 `1.2m` 근접)가 `3.0초` 연속 감지 확정되면 즉시 `/play/sound` (`dobingda.mp3` Edge-TTS 4단 안내 음성, 쿨다운 `50.0초`)를 발행합니다.
+  - **사람 근접 경보 분리**: `yolo_callback`에서 `person`(`conf >= 0.50`, 세로 `h >= 250px`, 약 `1.2m` 근접)이 `time.monotonic()` 기준 `3.0초` 연속 감지 확정되면 즉시 `/play/sound` (`dobingda` ➔ Pi 5 `dobingda0.mp3` 완곡 후 `dobingda.mp3` 순차 재생, 쿨다운 `50.0초`)를 발행합니다.
   - **CLI 채팅 분리**: 터미널 `qss` 질의는 `/vlm/chat_query` ↔ `/vlm/chat_response` 전용 토픽으로 처리해 Pi 5 스피커 발화를 유발하지 않습니다.
 
-### 5) 🚧 전 구간 상시 바닥 장애물 감지 노드 (`floor_obstacle_node.py`, `v1.4.9`)
+### 5) 🚧 전 구간 상시 바닥 장애물 감지 노드 (`floor_obstacle_node.py`, `v1.4.11 ~ v1.4.12`)
 - **상시 독립 파이프라인**: `/yolo/zone_enable`과 완전 분리되어 `/camera/image_raw/compressed`를 상시 구독하며 `self.processing` 프레임 드롭 가드를 유지합니다.
-- **OpenCV LAB/명도·에지 + 잔상 유지**: 중간값 균형 파라미터(`roi_top_ratio=0.58`, `chroma_thresh=12.0`, `luma_thresh=28.0`, `edge_low=40`, `edge_high=110`, `min_area_px=335`)와 YOLO 하단 좌표 보너스를 결합해 2프레임 확정(`confirm_frames=2`) + **`0.8초` 잔상 유지(`beam_hold_sec=0.8`)** 후 전방 `±33°` 67빔 가상 라이다(`/vision/scan`, `BEST_EFFORT`) 및 WebUI JSON(`/vision/floor_obstacles`)을 발행합니다.
+- **오탐 완화 & Dual Costmap 위임**: OpenCV LAB 색차(`chroma_thresh=18.0`) + 명도·에지(`luma_thresh=38.0`, `min_area_px=650`, `roi_top_ratio=0.58`, 밝은 바닥 반사광 억제 `dL_signed > luma_thresh * 1.7`)와 YOLO 하단 좌표 보너스를 결합해 4프레임 연속 확정(`confirm_frames=4`)합니다. 회전 시 유령 빔을 없애기 위해 **`beam_hold_sec=0.0`**(잔상 유지 로직은 `odom` 기준 Nav2 `vision_obstacle_layer` `raytrace_min_range: 0.0`에 위임) 및 **`lateral_padding_m=0.03`**을 적용해 전방 `±33°` 67빔 가상 라이다(`/vision/scan`, `BEST_EFFORT`) 및 WebUI JSON(`/vision/floor_obstacles`)을 발행합니다.
 
-### 6) 🪪 ArUco 숫자 카드 + 한 손 Nav2 제어 노드 (`gesture_node.py`, `v1.4.9`)
-- **하이브리드 경량 엔진**: `OpenCV ArUco (DICT_4X4_50)` 매 프레임(~5ms) + `MediaPipe Hands` (`model_complexity=1`, `mp_frame_stride=2`) CPU 경량 병행.
+### 6) 🪪 ArUco 숫자 카드 + 한 손 Nav2 제어 노드 (`gesture_node.py`, `v1.4.9 ~ v1.4.12`)
+- **하이브리드 경량 엔진**: `OpenCV ArUco (DICT_4X4_50)` 매 프레임(~5ms) + `MediaPipe Hands` (`model_complexity=1`, `mp_frame_stride=2`) CPU 경량 병행. 손가락 굽힘 판정 데드밴드를 교정(`d_tip > d_pip * 1.15` 펼침, `d_tip <= d_pip * 1.05` 굽힘)해 오인식을 줄였습니다.
 - **명령 매핑 (`/gesture/cmd`, `/gesture/state`)**:
   - **ArUco 카드 (`3~4m`)**: `ID 0` = `ESTOP` (`0.25s`, 쿨다운 `2s`), `ID 1~10` = `GOTO_WP` (`0.8s`, 쿨다운 `4s`, A4 11장 [`docs/aruco_wp_cards.pdf`](../../../docs/aruco_wp_cards.pdf)).
   - **한 손 제스처**: **✋ 손 활짝 펼침 (`1.5s`, 앞/뒷면 무관)** = `NAV2_STOP` (쿨다운 `10s`), **👍 엄지척 (`2.0s`)** = `NAV2_START` (Nav2 기동 + `auto_localizer` 완료 대기 후 자동 순찰 ON, 쿨다운 `15s`).

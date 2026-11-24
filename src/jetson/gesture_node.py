@@ -40,7 +40,7 @@ def classify_hand_pose(landmarks) -> str:
         d_pip = _dist2d(wrist, lm[pip_idx])
         if d_tip > d_pip * 1.15:
             extended_4 += 1
-        elif d_tip <= d_pip * 1.25:
+        elif d_tip <= d_pip * 1.05:
             curled_4 += 1
 
     # 1) ✋ 활짝 편 손 (앞면/뒷면 무관, 검지~새끼 4개 모두 펴짐)

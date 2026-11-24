@@ -1,6 +1,6 @@
 # 🚀 Jetson Orin Nano: YOLO11n ROS 2 패키지화 및 부팅 자동 실행 기술 명세서
 
-> **문서 버전**: v1.4.10  
+> **문서 버전**: v1.4.12  
 > **점검일**: 2026-11-24  
 > **대상 기기**: Jetson Orin Nano (`<JETSON_IP>:2222`, 계정: `<JETSON_USER>`, 컨테이너: `ros2_humble_dev` / `my_ros2_robot:humble`)  
 > **작성자**: `ROS2_JW`
@@ -11,7 +11,8 @@
 | `v1.0.0` | 26.11.04 | ROS2_JW | Approved | • `yolo11n` ROS 2 패키지화, 0.1ms JSON 경량 발행 및 부팅 자동 실행 명세 최초 제정 |
 | `v1.4.0` | 26.11.16 | ROS2_JW | Approved | • `rmw_cyclonedds_cpp` / `CYCLONEDDS_URI` 전환 및 `v1.4.0` 환경 현행화 |
 | `v1.4.9` | 26.11.23 | ROS2_JW | Approved | • `launch_yolo11n.sh` 통합 런처 내 `vlm_service_node.py` · `floor_obstacle_node.py` · `gesture_node.py` 3종 병렬 자동 기동 반영 |
-| **`v1.4.10`** | 26.11.24 | **ROS2_JW** | **Approved** | • `launch_yolo11n.sh` `! pgrep -f` 중복 방지 가드 · `"$@"` 인자 · `cyclonedds.xml` 폴백 버전을 `scripts/sync_to_robot.sh`로 Jetson 실기 배포 동기화 |
+| `v1.4.10` | 26.11.24 | ROS2_JW | Approved | • `launch_yolo11n.sh` `! pgrep -f` 중복 방지 가드 · `"$@"` 인자 · `cyclonedds.xml` 폴백 버전을 `scripts/sync_to_robot.sh`로 Jetson 실기 배포 동기화 |
+| **`v1.4.12`** | 26.11.24 | **ROS2_JW** | **Approved** | • `detector_node.py`·`yolo11n.launch.py` 기본값을 실기 표준(`yolo11s.pt`, `imgsz=640`, `conf=0.60`)으로 정렬(`yolo11n.pt` 경량 인자 옵션)<br>• 2초 주기 `/jetson/system_state` 실측 텔레메트리(RAM/Swap/온도) 발행, `network_failover.py` 무선 전환 시 유선 IP 삭제 및 `sync_to_robot.sh` Docker `install/` 동기화 반영 |
 
 ---
 
@@ -35,7 +36,7 @@ flowchart LR
     
     subgraph Jetson ["🟣 Tier 2: Jetson Orin Nano"]
         direction TB
-        B --> C["<b>yolo_detector 노드</b><br>• Ampere GPU 가속<br>• YOLO11n (~3-5ms)"]:::t2
+        B --> C["<b>yolo_detector 노드</b><br>• Ampere GPU 가속<br>• YOLO11s 기본 (640, conf=0.60)<br>• 2초 주기 /jetson/system_state"]:::t2
         C --> D{"publish_annotated<br>옵션 분기"}:::dec
         D -->|"False (기본값, 0.1ms)"| E["<b>/yolo/detections</b><br>(정밀 좌표 JSON)"]:::t2
         D -->|"True (디버그 렌더링)"| F["<b>/yolo/image_annotated</b><br>(박스 오버레이 영상)"]:::t2
@@ -111,10 +112,11 @@ setup(
 )
 ```
 
-#### (3) `detector_node.py` (인식 엔진)
+#### (3) `detector_node.py` (인식 엔진 & 시스템 텔레메트리)
 * **GPU 가속 자동 감지**: `torch.cuda.is_available()`를 통해 Jetson Orin Nano Ampere GPU(`0`) 자동 할당.
-* **대역폭/지연 절감**: Pi 5로부터 `CompressedImage`를 직접 수신하여 압축 해제 후 추론.
+* **대역폭/지연 절감**: Pi 5로부터 `CompressedImage`를 직접 수신하여 압축 해제 후 추론 (`self.processing` 프레임 드롭 가드).
 * **0.1ms JSON 바운딩박스 발행**: OpenCV의 `plot()` 및 `imencode()`를 기본 비활성화하여 **CPU 피크 전류 및 20ms 렌더링 지연을 원천 제거**, 구조화된 JSON 문자열(`/yolo/detections`)만 초고속 발행.
+* **실측 시스템 텔레메트리 (`/jetson/system_state`, `v1.4.12`)**: 2초 타이머로 `/proc/meminfo`(RAM/Swap)와 thermal zone(온도)을 읽어 JSON 발행해 WebUI에 실측 상태를 전달합니다(실측 예: `4.6 GB / 7.3 GB (63.2%)`, Swap `25 MB / 16.0 GB`, `67.9°C`).
 
 ```python
 # JSON 발행 구조 예시
@@ -138,12 +140,12 @@ setup(
 ```
 
 #### (4) `yolo11n.launch.py` (런처)
-파라미터 변경을 터미널에서 즉시 주입 가능:
+파라미터 변경을 터미널에서 즉시 주입 가능 (`v1.4.12`에서 실기 표준 `yolo11s.pt` 정렬, 경량 `yolo11n.pt` 인자 전환 지원):
 ```python
 # 지원 Launch Arguments
-# - model: 가중치 파일 경로 (기본값: /root/ros2_ws/yolo11n.pt)
-# - imgsz: 추론 해상도 (기본값: 480)
-# - conf: 검출 신뢰도 임계값 (기본값: 0.35)
+# - model: 가중치 파일 경로 (기본값: /root/ros2_ws/yolo11s.pt, 경량 옵션: /root/ros2_ws/yolo11n.pt)
+# - imgsz: 추론 해상도 (기본값: 640, 경량 옵션: 480)
+# - conf: 검출 신뢰도 임계값 (기본값: 0.60, 경량 옵션: 0.35)
 # - use_compressed: 압축 영상 수신 여부 (기본값: true)
 # - publish_annotated: 시각화 토픽 발행 여부 (기본값: false)
 ```
@@ -246,12 +248,12 @@ sequenceDiagram
 tail -f <JETSON_HOME>/ros2_ws/yolo11n_autostart.log
 
 # 정상 로그 예시:
-# [yolo_detector-1] >>> [YOLO11n] 모델 로딩 중: /root/ros2_ws/yolo11n.pt (디바이스: 0, 해상도: 480, 임계값: 0.35, 시각화발행: False)
-# [yolo_detector-1] >>> [YOLO11n] /root/ros2_ws/yolo11n.pt 로드 완료!
-# [yolo_detector-1] >>> [YOLO11n] /camera/image_raw/compressed 수신 대기 중...
+# [yolo_detector-1] >>> [YOLO11] 모델 로딩 중: /root/ros2_ws/yolo11s.pt (디바이스: 0, 해상도: 640, 임계값: 0.60, 시각화발행: False)
+# [yolo_detector-1] >>> [YOLO11] /root/ros2_ws/yolo11s.pt 로드 완료!
+# [yolo_detector-1] >>> [YOLO11] /camera/image_raw/compressed 수신 대기 중...
 ```
 
-### 5.2 수동 재시작 및 프로세스 관리
+### 5.2 수동 재시작 · 원격 동기화 및 네트워크 페일오버
 ```bash
 # 실행 중인 노드 정지
 docker exec ros2_humble_dev pkill -f yolo_detector
@@ -261,4 +263,8 @@ docker exec ros2_humble_dev pkill -f yolo_detector
 
 # 시각화 영상(RViz2 디버깅)을 켜고 실행하고 싶을 때
 docker exec -it ros2_humble_dev bash -c 'source /root/ros2_ws/install/setup.bash && ros2 launch yolo11n yolo11n.launch.py publish_annotated:=true'
+
+# 노트북에서 Jetson 원격 코드 동기화 (root 소유 Docker install/ 내부까지 자동 복사)
+bash scripts/sync_to_robot.sh jetson
 ```
+* **유무선 네트워크 페일오버 (`network-failover.service`, `src/jetson/scripts/network_failover.py`)**: 호스트 OS에서 `enP8p1s0`(유선) ↔ `wlP1p1s0`(무선) 링크를 감시해 고정 IP `<JETSON_IP>/24`를 자동 전환합니다. `v1.4.12`부터 Wi-Fi 전환 시 유선 인터페이스의 잔류 IP를 삭제하고 `time.monotonic()` 디바운스·정확한 프리픽스 체크(`f"{ip}/"`)를 적용해 라우팅 충돌을 차단했습니다.
